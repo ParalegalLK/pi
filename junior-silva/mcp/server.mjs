@@ -1,0 +1,63 @@
+#!/usr/bin/env node
+import readline from "node:readline";
+import { draftOrRevise } from "../services/drafter.mjs";
+import { research } from "../services/rag.mjs";
+import { continueReview, getFindings, startReview } from "../services/reviewer.mjs";
+import { translateDocument, translateText } from "../services/translator.mjs";
+
+const tools = [
+	{ name: "reviewer_perera_start_review", description: "Start an interactive legal-document review with Reviewer Perera. Accepts one document or a related set (for example, a main agreement and annexures) and reviews the set together. The service first asks party/perspective and factual context questions when needed. IMPORTANT INTERACTION CONTRACT: if the result has requires_user_reply=true, show the returned questions to the user and END the current assistant turn. Never invent answers, never silently choose 'Review normally' or 'Skip', and never call reviewer_perera_continue_review in the same turn. The continuation must wait for a later, real user message. No later research or drafting step is implied.", inputSchema: { type: "object", additionalProperties: false, properties: { file_path: { type: "string", description: "Path to one PDF, DOCX, DOC, ODT, Markdown, or text document." }, file_paths: { type: "array", minItems: 1, items: { type: "string" }, description: "All related local documents that must be considered together. Include the main agreement and every annexure supplied for this review." }, primary_file_path: { type: "string", description: "For a multi-document review, the path of the main agreement; other files are treated as related documents or annexures." }, perspective: { type: "string", description: "Party to protect only when the user already stated it. Do not ask the user again if it is explicit." }, instructions: { type: "string", description: "The user's complete review request and stated concerns, without adding assumptions." } } }, annotations: { title: "Start interactive review", readOnlyHint: false, destructiveHint: false } },
+	{ name: "reviewer_perera_continue_review", description: "Continue an existing Reviewer Perera review using the VERBATIM answer from a later user message. Call this only after reviewer_perera_start_review or a prior continuation returned requires_user_reply=true and the user then replied. Do not manufacture, summarize, or default the response on the user's behalf. If this tool again returns requires_user_reply=true, present those questions and end the turn. When complete it returns a downloadable annotated DOCX artifact.", inputSchema: { type: "object", additionalProperties: false, required: ["review_id", "response"], properties: { review_id: { type: "string", description: "Opaque review_id returned by Reviewer Perera." }, response: { type: "string", minLength: 1, description: "The user's actual reply from the later turn, verbatim. 'Review normally' or 'Skip' is valid only when the user actually said it." } } }, annotations: { title: "Continue interactive review", readOnlyHint: false, destructiveHint: false } },
+	{ name: "reviewer_perera_get_findings", description: "Retrieve structured clause-level findings for a completed Reviewer Perera review. Useful when another specialist needs exact clauses, classifications, comments, and recommendations.", inputSchema: { type: "object", additionalProperties: false, required: ["review_id"], properties: { review_id: { type: "string" } } } },
+	{ name: "rag_chat_research", description: "Research a Sri Lankan legal question through the citation-linked legal research service. The result includes answer plus a delivery contract and linked_authorities. STRICT CITATION DELIVERY: for a direct legal-research request where this is the only specialist tool used, deliver answer verbatim as the final user response. Preserve every Markdown hyperlink, heading, authority, and conclusion. Never replace linked cases, Acts, books, or gazettes with unlinked plain text. For a combined task, write tailored analysis only if needed, but preserve every authority URL associated with a proposition you retain; never invent or substitute a citation. Optional text or JSON files can supply relevant context.", inputSchema: { type: "object", additionalProperties: false, required: ["question"], properties: { question: { type: "string" }, context_files: { type: "array", items: { type: "string" }, description: "Optional local UTF-8 text, Markdown, or JSON context files." } } } },
+	{ name: "drafter_weeramantry_draft_or_revise", description: "Create or revise a legal document with Drafter Weeramantry. Supply the user's instruction and any source documents or context files. Returns the specialist response and local generated DOCX, Markdown, or PDF paths.", inputSchema: { type: "object", additionalProperties: false, required: ["instruction"], properties: { instruction: { type: "string" }, source_files: { type: "array", items: { type: "string" }, description: "Optional local source documents and context files." }, conversation_id: { type: "string", description: "Optional prior Drafter conversation id." } } } },
+	{ name: "translator_siriwardena_translate_document", description: "Translate a PDF, DOC, DOCX, or supported image between English, Sinhala, and Tamil with Translator Siriwardena. Returns translated text and local generated document paths when available.", inputSchema: { type: "object", additionalProperties: false, required: ["file_path", "target_language"], properties: { file_path: { type: "string" }, target_language: { type: "string" }, instructions: { type: "string" } } } },
+	{ name: "translator_siriwardena_translate_text", description: "Translate supplied text between English, Sinhala, and Tamil with Translator Siriwardena.", inputSchema: { type: "object", additionalProperties: false, required: ["text", "target_language"], properties: { text: { type: "string" }, target_language: { type: "string" } } } },
+];
+
+const handlers = new Map([
+	["reviewer_perera_start_review", startReview], ["reviewer_perera_continue_review", continueReview], ["reviewer_perera_get_findings", getFindings],
+	["rag_chat_research", research], ["drafter_weeramantry_draft_or_revise", draftOrRevise],
+	["translator_siriwardena_translate_document", translateDocument], ["translator_siriwardena_translate_text", translateText],
+]);
+
+function send(value) { process.stdout.write(`${JSON.stringify(value)}\n`); }
+function result(id, value) { send({ jsonrpc: "2.0", id, result: value }); }
+function rpcError(id, code, message) { send({ jsonrpc: "2.0", id, error: { code, message } }); }
+
+function progressReporter(token) {
+	let progress = 0;
+	return (message) => {
+		if (token === undefined || token === null || !message) return;
+		progress += 1;
+		send({ jsonrpc: "2.0", method: "notifications/progress", params: { progressToken: token, progress, message: String(message).replace(/\s+/g, " ").slice(0, 500) } });
+	};
+}
+
+async function handle(message) {
+	if (message.method === "initialize") { result(message.id, { protocolVersion: "2025-06-18", capabilities: { tools: { listChanged: false } }, serverInfo: { name: "junior-silva-legal-services", version: "2.0.0" }, instructions: "Independent specialist tools for legal research, interactive document review, drafting, and translation. Select tools from their capability descriptions; no fixed workflow is imposed." }); return; }
+	if (message.method === "notifications/initialized") return;
+	if (message.method === "ping") { result(message.id, {}); return; }
+	if (message.method === "tools/list") { result(message.id, { tools }); return; }
+	if (message.method === "resources/list") { result(message.id, { resources: [] }); return; }
+	if (message.method === "resources/templates/list") { result(message.id, { resourceTemplates: [] }); return; }
+	if (message.method === "prompts/list") { result(message.id, { prompts: [] }); return; }
+	if (message.method === "tools/call") {
+		const handler = handlers.get(message.params?.name);
+		if (!handler) { rpcError(message.id, -32602, `Unknown tool: ${message.params?.name}`); return; }
+		try {
+			const onProgress = progressReporter(message.params?._meta?.progressToken);
+			const output = await handler(message.params?.arguments || {}, { onProgress });
+			result(message.id, { content: [{ type: "text", text: JSON.stringify(output, null, 2) }], structuredContent: output });
+		}
+		catch (caught) { result(message.id, { content: [{ type: "text", text: caught instanceof Error ? caught.message : String(caught) }], isError: true }); }
+		return;
+	}
+	if (message.id !== undefined) rpcError(message.id, -32601, `Method not found: ${message.method}`);
+}
+
+const lines = readline.createInterface({ input: process.stdin, crlfDelay: Number.POSITIVE_INFINITY });
+lines.on("line", (line) => {
+	if (!line.trim()) return;
+	try { void handle(JSON.parse(line)); } catch (caught) { console.error(caught instanceof Error ? caught.message : String(caught)); }
+});

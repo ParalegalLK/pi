@@ -1,0 +1,10 @@
+.git
+.env
+node_modules
+junior-silva/node_modules
+junior-silva/artifacts
+junior-silva/uploads
+junior-silva/sessions
+*.log
+.vscode
+.idea

@@ -1,0 +1,75 @@
+services:
+  junior-silva-v2:
+    build: .
+    image: junior-silva-v2:local
+    container_name: junior-silva-v2
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      JUNIOR_SILVA_BIND_HOST: 0.0.0.0
+      JUNIOR_SILVA_PORT: "8126"
+      JUNIOR_SILVA_MODEL_NAME: ${JUNIOR_SILVA_MODEL_NAME:-junior-silva-v2}
+      JUNIOR_SILVA_PUBLIC_URL: ${JUNIOR_SILVA_PUBLIC_URL:-http://127.0.0.1:8132}
+      JUNIOR_SILVA_DATA_ROOT: /data
+      JUNIOR_SILVA_ARTIFACT_ROOT: /data/artifacts
+      JUNIOR_SILVA_UPLOAD_ROOT: /data/uploads
+      PI_CODING_AGENT_DIR: /data/pi-agent
+      PI_CODING_AGENT_SESSION_DIR: /data/sessions
+      REVIEWER_BASE_URL: http://reviewer_agent_v2_pi_api:8124
+      RAG_BASE_URL: http://rag-chat-server-legal-search-api-1:8123
+      DRAFTER_BASE_URL: http://drafter-weeramantry:8033
+      TRANSLATOR_BASE_URL: ${TRANSLATOR_BASE_URL:-https://www.devtranslate.paralegal.lk/api}
+    ports:
+      - "127.0.0.1:8132:8126"
+    volumes:
+      - junior_silva_v2_data:/data
+      - ./junior-silva/artifacts:/data/artifacts
+      - ./junior-silva/uploads:/data/uploads
+      - ./junior-silva/sessions:/data/sessions
+      - ./junior-silva/pi-agent:/data/pi-agent
+    networks:
+      - librechat
+      - rag
+    security_opt:
+      - no-new-privileges:true
+
+  junior-silva-cli:
+    profiles: ["cli"]
+    image: junior-silva-v2:local
+    env_file: .env
+    environment:
+      JUNIOR_SILVA_PUBLIC_URL: ${JUNIOR_SILVA_PUBLIC_URL:-http://127.0.0.1:8132}
+      JUNIOR_SILVA_DATA_ROOT: /data
+      JUNIOR_SILVA_ARTIFACT_ROOT: /data/artifacts
+      JUNIOR_SILVA_UPLOAD_ROOT: /data/uploads
+      PI_CODING_AGENT_DIR: /data/pi-agent
+      PI_CODING_AGENT_SESSION_DIR: /data/sessions
+      REVIEWER_BASE_URL: http://reviewer_agent_v2_pi_api:8124
+      RAG_BASE_URL: http://rag-chat-server-legal-search-api-1:8123
+      DRAFTER_BASE_URL: http://drafter-weeramantry:8033
+      TRANSLATOR_BASE_URL: ${TRANSLATOR_BASE_URL:-https://www.devtranslate.paralegal.lk/api}
+    command: ["node", "junior-silva/cli/docker-cli.mjs"]
+    stdin_open: true
+    tty: true
+    volumes:
+      - junior_silva_v2_data:/data
+      - ./junior-silva/artifacts:/data/artifacts
+      - ./junior-silva/uploads:/data/uploads
+      - ./junior-silva/sessions:/data/sessions
+      - ./junior-silva/pi-agent:/data/pi-agent
+    networks:
+      - librechat
+      - rag
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  junior_silva_v2_data:
+
+networks:
+  librechat:
+    external: true
+    name: ${LIBRECHAT_NETWORK:-librechat_default}
+  rag:
+    external: true
+    name: ${RAG_NETWORK:-rag-chat-server_default}

@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "junior-silva-legal": {
+      "command": "/usr/local/bin/node",
+      "args": [
+        "/app/junior-silva/mcp/server.mjs"
+      ],
+      "cwd": "/app",
+      "exposure": "direct",
+      "timeout": 1200,
+      "description": "Independent legal research, interactive review, drafting, and translation tools."
+    }
+  }
+}
