@@ -15,4 +15,5 @@ $model = if ($pairs['PI_MODEL']) { $pairs['PI_MODEL'] } else { 'gemini-3.1-flash
 $thinking = if ($pairs['PI_THINKING']) { $pairs['PI_THINKING'] } else { 'medium' }
 $citationDelivery = Join-Path $PSScriptRoot '.pi/extensions/legal-research-citation-delivery.ts'
 $previewDelivery = Join-Path $PSScriptRoot '.pi/extensions/librechat-preview-delivery.ts'
-& node (Join-Path $PSScriptRoot 'packages/coding-agent/dist/bundle/cli.js') --tui-mode regular --provider $provider --model $model --thinking $thinking --extension $citationDelivery --extension $previewDelivery @args
+$legalContext = Join-Path $PSScriptRoot '.pi/extensions/junior-silva-legal-context.ts'
+& node (Join-Path $PSScriptRoot 'packages/coding-agent/dist/bundle/cli.js') --tui-mode regular --no-builtin-tools --provider $provider --model $model --thinking $thinking --extension $legalContext --extension $citationDelivery --extension $previewDelivery @args

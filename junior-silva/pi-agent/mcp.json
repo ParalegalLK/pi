@@ -1,11 +1,11 @@
 {
   "mcpServers": {
     "junior-silva-legal": {
-      "command": "/usr/local/bin/node",
+      "command": "C:\\Program Files\\nodejs\\node.exe",
       "args": [
-        "/app/junior-silva/mcp/server.mjs"
+        "D:\\Intern\\Work\\Junior Silva V2\\pi\\junior-silva\\mcp\\server.mjs"
       ],
-      "cwd": "/app",
+      "cwd": "D:\\Intern\\Work\\Junior Silva V2\\pi",
       "exposure": "direct",
       "timeout": 1200,
       "description": "Independent legal research, interactive review, drafting, and translation tools."

@@ -117,3 +117,10 @@ This history records the development of the independent Junior Silva V2 integrat
 
 - A current-events test exposed that Pi itself was not supplied with a runtime “current date” context. It incorrectly described a September 2026 event as future despite the runtime date being 5 October 2026 (Asia/Colombo).
 - This is a temporal-grounding defect, not a reason to restrict historical searches. The planned correction is to inject the live Asia/Colombo date into every Pi request and web-research result, then require current-status answers to distinguish event, publication, and legal-commencement dates against that runtime reference.
+
+## 16. Legal scope and runtime chronology safeguards (6 October 2026)
+
+- Added a Junior Silva Pi extension that constrains both the interactive CLI and the OpenAI-compatible endpoint to Sri Lankan legal work. It gives the requested Junior Silva greeting for a simple greeting and declines clearly non-legal requests such as ordinary coding, essays, and casual tasks.
+- The hosted endpoint already uses `--no-builtin-tools`; the local launcher now uses the same legal-only tool boundary. Legal MCP tools remain available in both environments.
+- Added a live `Asia/Colombo` clock to Pi's system context, RAG requests, and public-web research results. It tells the model to evaluate dates against the actual runtime date and to distinguish event, publication, Gazette, and commencement dates. It does not contain an instruction to discard or downgrade older legal authorities.
+- The code-runner remains the existing data-only transformation tool. A general arbitrary-code executor was not added because it would require a separately approved, properly isolated execution service.

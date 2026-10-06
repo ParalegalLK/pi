@@ -5,7 +5,8 @@ import { env, projectRoot } from "../core/environment.mjs";
 
 const cli = path.join(projectRoot, "packages", "coding-agent", "dist", "bundle", "cli.js");
 const args = [
-	cli, "--tui-mode", "regular",
+	cli, "--tui-mode", "regular", "--no-builtin-tools",
+	"--extension", path.join(projectRoot, ".pi", "extensions", "junior-silva-legal-context.ts"),
 	"--extension", path.join(projectRoot, ".pi", "extensions", "legal-research-citation-delivery.ts"),
 	"--extension", path.join(projectRoot, ".pi", "extensions", "librechat-preview-delivery.ts"),
 ];

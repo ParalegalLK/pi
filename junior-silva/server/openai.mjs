@@ -158,6 +158,7 @@ async function runPi(prompt, sessionId, onProgress) {
 		"--mode", "json", "--no-builtin-tools", "--session-id", sessionId,
 		// Project extensions are explicit so the hosted endpoint behaves exactly
 		// like the local CLI, even when Pi's discovery configuration changes.
+		"--extension", path.join(projectRoot, ".pi", "extensions", "junior-silva-legal-context.ts"),
 		"--extension", path.join(projectRoot, ".pi", "extensions", "legal-research-citation-delivery.ts"),
 		"--extension", path.join(projectRoot, ".pi", "extensions", "librechat-preview-delivery.ts"),
 	];
@@ -178,6 +179,7 @@ async function runPi(prompt, sessionId, onProgress) {
 			for (const line of lines) {
 				try {
 					const event = JSON.parse(line);
+					if (event.type === "message_end" && event.message?.role === "custom" && event.message?.customType === "junior-silva-scope" && typeof event.message?.content === "string") finalText = event.message.content;
 					if (event.type === "agent_start") onProgress("Pi is planning the requested work…");
 					if (event.type === "tool_execution_start") onProgress(progressName(event.toolName || event.tool_name));
 					if (event.type === "tool_execution_update") {

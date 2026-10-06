@@ -1,4 +1,5 @@
 import { booleanEnv, env, requiredEnv } from "../core/environment.mjs";
+import { colomboNow, temporalContext } from "../core/time.mjs";
 
 function safeQuery(value) {
 	const query = String(value || "").replace(/\s+/g, " ").trim();
@@ -22,5 +23,6 @@ export async function searchPublicLegalSources(args, { onProgress = () => {} } =
 	if (!response.ok) throw new Error(`Web search failed (${response.status}).`);
 	const payload = await response.json();
 	const items = (payload.organic || []).filter((item) => item?.link && /^https?:\/\//.test(item.link));
-	return { query, sources: items, answer: `# Current public-source research\n\n${markdown(items)}\n\nUse these URLs exactly when relying on a source. Search results are leads; distinguish official legal sources from reporting.` };
+	const now = colomboNow();
+	return { query, researched_at: now, sources: items, answer: `# Current public-source research\n\n${temporalContext()}\n\n${markdown(items)}\n\nUse these URLs exactly when relying on a source. Search results are leads; distinguish official legal sources from reporting.` };
 }
