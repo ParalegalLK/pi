@@ -10,15 +10,24 @@ ENV NODE_ENV=production \
 
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates libreoffice-writer pandoc poppler-utils python3 python3-pip \
+      ca-certificates libreoffice-impress libreoffice-writer pandoc poppler-utils python3 python3-pip python3-defusedxml \
     && rm -rf /var/lib/apt/lists/*
 
 COPY package.json package-lock.json ./
 COPY packages ./packages
 COPY scripts ./scripts
 COPY tsconfig.json tsconfig.base.json biome.json ./
-RUN npm ci --include=dev --ignore-scripts
-RUN npm run build:offline
+RUN npm ci --include=dev --ignore-scripts \
+      --fetch-retries=5 \
+      --fetch-retry-mintimeout=10000 \
+      --fetch-retry-maxtimeout=120000 \
+      --fetch-timeout=600000
+RUN npx playwright install --with-deps chromium
+RUN mkdir -p /ms-playwright && cp -a /root/.cache/ms-playwright/. /ms-playwright/ && chmod -R a+rX /ms-playwright
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+# Provider catalog JSON is generated and intentionally ignored by Git. Hydrate
+# it inside the image so a fresh clone can build without local developer state.
+RUN npm run hydrate:model-data && npm run build:offline
 
 COPY junior-silva/package.json junior-silva/package-lock.json ./junior-silva/
 RUN npm --prefix junior-silva ci --omit=dev --ignore-scripts

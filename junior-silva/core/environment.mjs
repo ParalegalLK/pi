@@ -36,5 +36,6 @@ export function booleanEnv(name, fallback = false) {
 export const dataRoot = path.resolve(env("JUNIOR_SILVA_DATA_ROOT", path.join(projectRoot, "junior-silva")));
 export const artifactsRoot = path.resolve(env("JUNIOR_SILVA_ARTIFACT_ROOT", path.join(dataRoot, "artifacts")));
 export const uploadsRoot = path.resolve(env("JUNIOR_SILVA_UPLOAD_ROOT", path.join(dataRoot, "uploads")));
+export const workspaceRoot = path.resolve(env("JUNIOR_SILVA_WORKSPACE_ROOT", path.join(dataRoot, "workspace")));
 
 export { projectRoot };

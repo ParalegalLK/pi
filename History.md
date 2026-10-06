@@ -124,3 +124,12 @@ This history records the development of the independent Junior Silva V2 integrat
 - The hosted endpoint already uses `--no-builtin-tools`; the local launcher now uses the same legal-only tool boundary. Legal MCP tools remain available in both environments.
 - Added a live `Asia/Colombo` clock to Pi's system context, RAG requests, and public-web research results. It tells the model to evaluate dates against the actual runtime date and to distinguish event, publication, Gazette, and commencement dates. It does not contain an instruction to discard or downgrade older legal authorities.
 - The code-runner remains the existing data-only transformation tool. A general arbitrary-code executor was not added because it would require a separately approved, properly isolated execution service.
+
+## 17. Built-in skill execution for legal artifact work (6 October 2026)
+
+- Pi's normal built-in tools are enabled for the Windows CLI, Docker CLI, and hosted OpenAI-compatible endpoint. This allows Pi to read the discovered document skills and execute their documented Python, Node, and supporting commands when preparing a legal work product.
+- The existing Junior Silva legal-scope extension remains active in every launch path. It returns the prescribed greeting, intercepts plainly non-legal requests before an agent run, and supplies the Sri Lankan legal-only service instructions to Pi.
+- The hosted path uses Pi's non-interactive approval mode so a legal document skill can complete its approved commands during a LibreChat request. LibreChat itself receives only the final answer, status updates, and protected artifacts.
+- Added one general `workbench_publish_artifact` MCP tool and a dedicated writable workspace. It publishes a final PPTX, XLSX, DOCX, PDF, Markdown, text, or JSON artifact created by any discovered skill without exposing the workspace itself. This avoids a service-specific publishing tool for every future skill.
+- The V2 container now includes the presentation runtime required by the bundled PPTX skill: LibreOffice Impress, Playwright Chromium, PptxGenJS, React, React DOM, React Icons, Sharp, and Python's defusedxml support. Drafter's tool description now expressly excludes presentations, slide decks, spreadsheets, and other visual/data artifacts so Pi can select a discovered document skill instead.
+- Playwright's browser cache is copied to a shared read-only runtime location in the image, so the non-root Pi process does not have to download Chromium again for each presentation request.

@@ -1,8 +1,8 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { artifactsRoot, env } from "./environment.mjs";
+import { artifactsRoot, env, workspaceRoot } from "./environment.mjs";
 import { download } from "./http.mjs";
 
 const MAX_INPUT_BYTES = 50 * 1024 * 1024;
@@ -10,6 +10,8 @@ const INPUT_EXTENSIONS = new Set([".pdf", ".docx", ".doc", ".odt", ".txt", ".md"
 const MIME = new Map([
 	[".pdf", "application/pdf"],
 	[".docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
+	[".pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"],
+	[".xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"],
 	[".doc", "application/msword"],
 	[".odt", "application/vnd.oasis.opendocument.text"],
 	[".md", "text/markdown; charset=utf-8"],
@@ -50,6 +52,20 @@ export async function operationDirectory(prefix) {
 	const directory = path.join(artifactsRoot, id);
 	await mkdir(directory, { recursive: true });
 	return { id, directory };
+}
+
+export async function publishWorkspaceArtifact(filename, title) {
+	const source = path.resolve(String(filename || ""));
+	if (!source.startsWith(`${workspaceRoot}${path.sep}`) && !source.startsWith(`${artifactsRoot}${path.sep}`)) throw new Error("Only files created in Junior Silva's workspace can be published.");
+	const info = await stat(source);
+	if (!info.isFile() || info.size > MAX_INPUT_BYTES) throw new Error("The requested artifact is not a supported publishable file.");
+	const extension = path.extname(source).toLowerCase();
+	if (!new Set([".pptx", ".xlsx", ".docx", ".pdf", ".md", ".txt", ".json"]).has(extension)) throw new Error("Only PPTX, XLSX, DOCX, PDF, Markdown, text, and JSON files can be published.");
+	const operation = await operationDirectory("artifact");
+	const name = safeFilename(title ? `${title}${extension}` : path.basename(source), `legal-artifact${extension}`);
+	const destination = path.join(operation.directory, name);
+	await copyFile(source, destination);
+	return { operation_id: operation.id, artifact: describeArtifact(destination, operation.id) };
 }
 export async function saveJson(directory, filename, value) {
 	const destination = path.join(directory, filename);

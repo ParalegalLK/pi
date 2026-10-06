@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { artifactsRoot, env, projectRoot, requiredEnv, uploadsRoot } from "../core/environment.mjs";
+import { artifactsRoot, env, projectRoot, requiredEnv, uploadsRoot, workspaceRoot } from "../core/environment.mjs";
 import { mimeType, resolveArtifactRequest, safeFilename } from "../core/files.mjs";
 
 const PORT = Number(env("JUNIOR_SILVA_PORT", "8126"));
@@ -147,7 +147,7 @@ function piPrompt(instruction, files) {
 }
 
 function progressName(toolName) {
-	return ({ reviewer_perera_start_review: "Reviewer Perera is reading the supplied document set…", reviewer_perera_continue_review: "Reviewer Perera is applying the user's answers…", reviewer_perera_get_findings: "Retrieving Reviewer Perera's clause findings…", rag_chat_research: "Researching Sri Lankan legal authorities and linked citations…", drafter_weeramantry_draft_or_revise: "Drafter Weeramantry is preparing the legal document…", translator_siriwardena_translate_document: "Translator Siriwardena is translating the document…", translator_siriwardena_translate_text: "Translator Siriwardena is translating the supplied text…", librechat_prepare_document_preview: "Preparing a local document preview…" })[toolName] || `Using ${toolName || "a specialist tool"}…`;
+	return ({ reviewer_perera_start_review: "Reviewer Perera is reading the supplied document set…", reviewer_perera_continue_review: "Reviewer Perera is applying the user's answers…", reviewer_perera_get_findings: "Retrieving Reviewer Perera's clause findings…", rag_chat_research: "Researching Sri Lankan legal authorities and linked citations…", drafter_weeramantry_draft_or_revise: "Drafter Weeramantry is preparing the legal document…", translator_siriwardena_translate_document: "Translator Siriwardena is translating the document…", translator_siriwardena_translate_text: "Translator Siriwardena is translating the supplied text…", workbench_publish_artifact: "Publishing the completed legal file for download…", librechat_prepare_document_preview: "Preparing a local document preview…" })[toolName] || `Using ${toolName || "a specialist tool"}…`;
 }
 
 async function runPi(prompt, sessionId, onProgress) {
@@ -155,7 +155,7 @@ async function runPi(prompt, sessionId, onProgress) {
 	// Full Pi remains available through the Windows and Docker CLI launchers.
 	const args = [
 		PI_CLI,
-		"--mode", "json", "--no-builtin-tools", "--session-id", sessionId,
+		"--mode", "json", "--approve", "--session-id", sessionId,
 		// Project extensions are explicit so the hosted endpoint behaves exactly
 		// like the local CLI, even when Pi's discovery configuration changes.
 		"--extension", path.join(projectRoot, ".pi", "extensions", "junior-silva-legal-context.ts"),
@@ -237,7 +237,7 @@ async function serveArtifact(res, pathname) {
 	res.end(bytes);
 }
 
-await Promise.all([mkdir(artifactsRoot, { recursive: true }), mkdir(uploadsRoot, { recursive: true }), mkdir(SESSION_ROOT, { recursive: true }), mkdir(AGENT_ROOT, { recursive: true })]);
+await Promise.all([mkdir(artifactsRoot, { recursive: true }), mkdir(uploadsRoot, { recursive: true }), mkdir(workspaceRoot, { recursive: true }), mkdir(SESSION_ROOT, { recursive: true }), mkdir(AGENT_ROOT, { recursive: true })]);
 // Hosted mode uses an administrator-owned global MCP registration. It does not
 // bypass Pi's project-trust prompt or approve arbitrary project-local code.
 await writeFile(path.join(AGENT_ROOT, "mcp.json"), `${JSON.stringify({

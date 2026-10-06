@@ -17,8 +17,13 @@ packages/ai/src/providers/.model-generation-*/
 junior-silva/artifacts/
 junior-silva/uploads/
 junior-silva/sessions/
+junior-silva/workspace/
 junior-silva/audit/
 junior-silva/node_modules/
+junior-silva/pi-agent/
+
+# Local test artifacts created outside the mounted Junior Silva workspace.
+workspace/
 
 # Editor files
 .vscode/
