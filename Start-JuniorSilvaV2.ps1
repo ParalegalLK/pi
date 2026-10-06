@@ -13,4 +13,6 @@ foreach ($name in @('GEMINI_API_KEY', 'ANTHROPIC_API_KEY')) { if ($pairs[$name])
 $provider = if ($pairs['PI_PROVIDER']) { $pairs['PI_PROVIDER'] } else { 'google' }
 $model = if ($pairs['PI_MODEL']) { $pairs['PI_MODEL'] } else { 'gemini-3.1-flash-lite-preview' }
 $thinking = if ($pairs['PI_THINKING']) { $pairs['PI_THINKING'] } else { 'medium' }
-& node (Join-Path $PSScriptRoot 'packages/coding-agent/dist/bundle/cli.js') --tui-mode regular --provider $provider --model $model --thinking $thinking @args
+$citationDelivery = Join-Path $PSScriptRoot '.pi/extensions/legal-research-citation-delivery.ts'
+$previewDelivery = Join-Path $PSScriptRoot '.pi/extensions/librechat-preview-delivery.ts'
+& node (Join-Path $PSScriptRoot 'packages/coding-agent/dist/bundle/cli.js') --tui-mode regular --provider $provider --model $model --thinking $thinking --extension $citationDelivery --extension $previewDelivery @args

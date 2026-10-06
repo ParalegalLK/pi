@@ -11,7 +11,8 @@ Junior Silva Legal Services MCP (stdio)
     ├── Reviewer Perera V2 — interactive single/multi-document review
     ├── RAG Chat Server — linked Sri Lankan legal research
     ├── Drafter Weeramantry — drafting and revision with local artifacts
-    └── Translator Siriwardena — text and document translation
+    ├── Translator Siriwardena — text and document translation
+    └── LibreChat preview preparation — optional local artifact rendering
 ```
 
 ## Implemented repository layout
@@ -42,11 +43,14 @@ pi/
 - `reviewer_perera_start_review` accepts one document or a related document set. For multiple files it extracts and labels the primary agreement and annexures in one combined review packet. When Reviewer Perera asks questions, the result explicitly requires a later user reply; Pi presents the questions and ends its turn.
 - `reviewer_perera_continue_review` accepts only the later user's real answer. It preserves the original legal objective, waits safely for Reviewer Perera's asynchronous job, and returns the localized annotated `Reviewed_document.docx`.
 - `reviewer_perera_get_findings` returns the protected structured clause findings for an already completed review.
-- `rag_chat_research` returns the RAG service's client-ready research. Its contract tells Pi to retain the service's substantive structure, conclusion, and Markdown links to cases, legislation, and books.
+- `rag_chat_research` returns the RAG service's client-ready research. Its contract tells Pi to retain the service's substantive structure, conclusion, and Markdown links to cases, legislation, and books. It distinguishes a direct research answer from research supporting a separate work product, so citation links survive synthesis into an email or letter.
 - `drafter_weeramantry_draft_or_revise` accepts instructions plus optional local source files. Remote Drafter outputs are downloaded locally and returned as protected DOCX/Markdown/PDF artifacts.
 - `translator_siriwardena_translate_document` and `translator_siriwardena_translate_text` expose document and direct-text translation separately, preventing unnecessary drafting calls for plain translation.
+- `librechat_prepare_document_preview` is an optional presentation tool. Pi may use it when the user asks to inspect a completed DOCX, PDF, Markdown, text, or JSON deliverable. It creates a sanitized LibreChat Artifact preview and never changes the source file.
 
 All specialist services emit MCP progress notifications. The OpenAI-compatible bridge converts those to `reasoning_content`, which LibreChat can display as the visible thought/status stream.
+
+For RAG-only requests, the exact linked RAG response is delivered verbatim. For combined requests, a citation-delivery extension restores known original links where an authority label is retained and adds a concise linked-authority section only if the combined work product would otherwise contain none.
 
 ## Files and downloads
 
@@ -98,13 +102,14 @@ For browser-downloadable artifacts in a deployed environment, set `JUNIOR_SILVA_
 
 ## Verified behavior
 
-- Pi reports version `1.0.0`; all seven MCP tools connect.
+- Pi reports version `1.0.0`; all eight MCP tools connect.
 - A three-document agreement/annexure review was sent as one combined packet. Pi asked Reviewer Perera's real questions and did not auto-answer them.
 - A later real user answer completed the same review, retained the Background-IP concern, produced clause 6.1 findings, and returned a valid annotated DOCX.
 - LibreChat-style Upload as Text was reconstructed, reviewed interactively, and completed only after the user's second-turn answers.
 - Protected Reviewer and Drafter DOCX/Markdown downloads returned HTTP 200 with correct MIME types and valid content.
 - Dockerized Pi independently selected RAG for a legal question and preserved linked Lex/NLR/SLLR authorities and answer sections.
 - Dockerized Pi independently selected Translator Siriwardena and returned Sinhala text.
+- DOCX, reviewed DOCX, PDF, and Markdown previews were generated locally into safe LibreChat Artifact markup; reviewed-DOCX previews retain a dashboard and reviewer comments beside the matched clauses while leaving the original DOCX unchanged.
 - The image builds, the container is healthy on port 8132, and the Docker CLI reports Pi `1.0.0`.
 
 ## Original approved implementation plan

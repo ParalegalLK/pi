@@ -95,3 +95,25 @@ This history records the development of the independent Junior Silva V2 integrat
 - The working branch is `dev`, based on Pi `1.0.0`.
 - The V2 implementation files are currently local worktree changes awaiting a deliberate user-controlled review, stage, commit, and push.
 - No commit or push is made as part of this history update.
+
+## 13. Citation delivery and optional LibreChat previews
+
+- The RAG adapter now returns a structured authority bundle in addition to its normal linked research answer.
+- Research calls identify whether RAG is the direct final answer or support for a separate user-requested work product. This prevents a research-backed email or letter from losing the original case/legislation URLs during synthesis.
+- The citation-delivery extension preserves existing links, restores matching authority links in combined responses, and adds a small linked-authority section only when a combined answer would otherwise lose every available authority link.
+- An optional `librechat_prepare_document_preview` MCP tool was added. Pi may choose it for substantial completed deliverables. It renders Markdown natively and produces local sanitized HTML previews for DOCX and PDF files.
+- Reviewed-DOCX preview generation reads Word comments and anchors from OOXML and places reviewer notes beside the matching rendered clauses. The original downloadable DOCX/PDF is not modified.
+
+## 14. Tool-routing, citation, web, and code-runner refinements (5 October 2026)
+
+- Citation preservation was corrected at the delivery boundary rather than by changing RAG Chat. The citation-delivery extension now recognises the actual native MCP research tool name (`rag_chat_research`, including Pi's namespaced variants), reads both textual and structured authority results, preserves already-linked Markdown, and restores a compact **Linked authorities supporting this draft** section only if a research-backed combined deliverable would otherwise lose every authority link.
+- This specifically covers the difference between a direct research answer (where Pi generally returned RAG's answer verbatim) and a combined task such as “research, then draft an email”, where a later model synthesis had previously reduced linked citations to plain case or Act names.
+- Drafter Weeramantry's MCP description was narrowed to its intended role: downloadable formal legal instruments, substantial legal-document revisions, or requested DOCX/PDF/Markdown work products. It expressly tells Pi not to use Drafter for ordinary emails, short complaint letters, chat replies, summaries, or legal research. Those should normally be written directly in chat unless the user expressly requests a formatted downloadable document.
+- Added optional public-web research and a sandboxed data-transform capability to the MCP service. Public web research currently discovers sources through Serper; the configuration also holds optional Firecrawl and Jina settings for a subsequent verified-fetch/rerank stage. The data runner is deliberately limited to data-only JavaScript transformations and blocks filesystem, process, shell, network, module-loading, and dynamic-code facilities.
+- Runtime feature flags and credentials remain in `.env` only. The web and code facilities can be enabled or disabled independently without changing Pi's legal-service contracts.
+- Validation covered MCP registration, JavaScript syntax checks, web-search discovery, isolated data transformation, explicit RAG research with authority links, and a research-backed drafting response. A Gemini 3.7 Flash test confirmed the configured runtime model and successful linked-authority restoration.
+
+## 15. Outstanding temporal-grounding improvement
+
+- A current-events test exposed that Pi itself was not supplied with a runtime “current date” context. It incorrectly described a September 2026 event as future despite the runtime date being 5 October 2026 (Asia/Colombo).
+- This is a temporal-grounding defect, not a reason to restrict historical searches. The planned correction is to inject the live Asia/Colombo date into every Pi request and web-research result, then require current-status answers to distinguish event, publication, and legal-commencement dates against that runtime reference.

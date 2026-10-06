@@ -147,13 +147,20 @@ function piPrompt(instruction, files) {
 }
 
 function progressName(toolName) {
-	return ({ reviewer_perera_start_review: "Reviewer Perera is reading the supplied document set…", reviewer_perera_continue_review: "Reviewer Perera is applying the user's answers…", reviewer_perera_get_findings: "Retrieving Reviewer Perera's clause findings…", rag_chat_research: "Researching Sri Lankan legal authorities and linked citations…", drafter_weeramantry_draft_or_revise: "Drafter Weeramantry is preparing the legal document…", translator_siriwardena_translate_document: "Translator Siriwardena is translating the document…", translator_siriwardena_translate_text: "Translator Siriwardena is translating the supplied text…" })[toolName] || `Using ${toolName || "a specialist tool"}…`;
+	return ({ reviewer_perera_start_review: "Reviewer Perera is reading the supplied document set…", reviewer_perera_continue_review: "Reviewer Perera is applying the user's answers…", reviewer_perera_get_findings: "Retrieving Reviewer Perera's clause findings…", rag_chat_research: "Researching Sri Lankan legal authorities and linked citations…", drafter_weeramantry_draft_or_revise: "Drafter Weeramantry is preparing the legal document…", translator_siriwardena_translate_document: "Translator Siriwardena is translating the document…", translator_siriwardena_translate_text: "Translator Siriwardena is translating the supplied text…", librechat_prepare_document_preview: "Preparing a local document preview…" })[toolName] || `Using ${toolName || "a specialist tool"}…`;
 }
 
 async function runPi(prompt, sessionId, onProgress) {
 	// The hosted surface exposes the legal MCP tools, never Pi's shell/edit tools.
 	// Full Pi remains available through the Windows and Docker CLI launchers.
-	const args = [PI_CLI, "--mode", "json", "--no-builtin-tools", "--session-id", sessionId];
+	const args = [
+		PI_CLI,
+		"--mode", "json", "--no-builtin-tools", "--session-id", sessionId,
+		// Project extensions are explicit so the hosted endpoint behaves exactly
+		// like the local CLI, even when Pi's discovery configuration changes.
+		"--extension", path.join(projectRoot, ".pi", "extensions", "legal-research-citation-delivery.ts"),
+		"--extension", path.join(projectRoot, ".pi", "extensions", "librechat-preview-delivery.ts"),
+	];
 	if (env("PI_PROVIDER")) args.push("--provider", env("PI_PROVIDER"));
 	if (env("PI_MODEL")) args.push("--model", env("PI_MODEL"));
 	if (env("PI_THINKING")) args.push("--thinking", env("PI_THINKING"));

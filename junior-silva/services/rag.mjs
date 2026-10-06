@@ -15,5 +15,9 @@ export async function research(args, { onProgress = () => {} } = {}) {
 		body: JSON.stringify({ model: "legal-research-agent", stream: true, messages: [{ role: "user", content }] }),
 	}, "Sri Lankan Legal RAG", 1_200_000, onProgress);
 	const cleanAnswer = answer.replace(/<think>[\s\S]*?<\/think>\s*/gi, "").trim();
-	return { answer: cleanAnswer, delivery: researchDelivery(cleanAnswer) };
+	const delivery = researchDelivery(cleanAnswer, args.delivery_mode);
+	// Keep a first-class citation bundle as well as the human-readable answer.
+	// A downstream drafting task may need to preserve these links even if it
+	// paraphrases RAG's prose rather than returning the answer verbatim.
+	return { answer: cleanAnswer, delivery, linked_authorities: delivery.linked_authorities };
 }
