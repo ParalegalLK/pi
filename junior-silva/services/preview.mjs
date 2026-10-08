@@ -21,6 +21,6 @@ export async function prepareDocumentPreview(args, { onProgress = () => {} } = {
 		preview_kind: preview.kind,
 		preview_title: preview.title,
 		artifact_markup: preview.markup,
-		delivery_instruction: "The original downloadable file remains unchanged. The artifact_markup is a user-visible LibreChat preview; include it only when a preview was requested or would materially help the user inspect this completed deliverable.",
+		delivery_instruction: "The original downloadable file remains unchanged. The artifact_markup is the user-visible LibreChat preview for this completed deliverable; include it with the final delivery after the preview tool is called.",
 	};
 }

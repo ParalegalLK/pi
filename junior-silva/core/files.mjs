@@ -6,7 +6,7 @@ import { artifactsRoot, env, workspaceRoot } from "./environment.mjs";
 import { download } from "./http.mjs";
 
 const MAX_INPUT_BYTES = 50 * 1024 * 1024;
-const INPUT_EXTENSIONS = new Set([".pdf", ".docx", ".doc", ".odt", ".txt", ".md", ".json", ".png", ".jpg", ".jpeg"]);
+const INPUT_EXTENSIONS = new Set([".pdf", ".docx", ".doc", ".odt", ".pptx", ".xlsx", ".txt", ".md", ".json", ".png", ".jpg", ".jpeg"]);
 const MIME = new Map([
 	[".pdf", "application/pdf"],
 	[".docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],

@@ -25,9 +25,12 @@ RUN npm ci --include=dev --ignore-scripts \
 RUN npx playwright install --with-deps chromium
 RUN mkdir -p /ms-playwright && cp -a /root/.cache/ms-playwright/. /ms-playwright/ && chmod -R a+rX /ms-playwright
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-# Provider catalog JSON is generated and intentionally ignored by Git. Hydrate
-# it inside the image so a fresh clone can build without local developer state.
-RUN npm run hydrate:model-data && npm run build:offline
+# Provider catalog JSON is generated and intentionally ignored by Git. Remove
+# any developer-hydrated copy first: Docker's overlay filesystem cannot rename
+# that copied lower-layer directory into the generator's temporary staging area.
+RUN rm -rf packages/ai/src/providers/data \
+    && npm run hydrate:model-data \
+    && npm run build:offline
 
 COPY junior-silva/package.json junior-silva/package-lock.json ./junior-silva/
 RUN npm --prefix junior-silva ci --omit=dev --ignore-scripts
