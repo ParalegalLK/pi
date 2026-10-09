@@ -6,7 +6,7 @@
 			"cwd": ".",
 			"exposure": "direct",
 			"timeout": 1200,
-			"description": "Independent specialist tools for Sri Lankan legal research, document review, legal drafting, and English/Sinhala/Tamil translation."
+			"description": "Independent tools for Sri Lankan legal research, source-anchored native document review, native drafting, and English/Sinhala/Tamil translation."
 		}
 	}
 }

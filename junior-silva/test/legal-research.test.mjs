@@ -13,7 +13,7 @@ test("linkedAuthorities retains unique Markdown authority links", () => {
 
 test("researchDelivery marks direct research for verbatim delivery", () => {
 	const delivery = researchDelivery(ANSWER);
-	assert.equal(delivery.mode, "verbatim_for_direct_research");
+	assert.equal(delivery.mode, "direct_answer");
 	assert.equal(delivery.linked_authorities.length, 2);
 	assert.match(delivery.instruction, /verbatim/i);
 });

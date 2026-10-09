@@ -3,9 +3,9 @@ import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { artifactsRoot, env, projectRoot, requiredEnv, uploadsRoot } from "../core/environment.mjs";
+import { artifactsRoot, env, projectRoot, requiredEnv, uploadsRoot, workspaceRoot } from "../core/environment.mjs";
 import { mimeType, resolveArtifactRequest, safeFilename } from "../core/files.mjs";
 
 const PORT = Number(env("JUNIOR_SILVA_PORT", "8126"));
@@ -141,21 +141,32 @@ async function saveUploads(key, candidates, extracted) {
 	return paths;
 }
 
+async function conversationUploadPaths(key) {
+	const directory = path.join(uploadsRoot, key);
+	try {
+		const entries = await readdir(directory, { withFileTypes: true });
+		return entries.filter((entry) => entry.isFile()).map((entry) => path.join(directory, entry.name)).sort();
+	} catch (caught) {
+		if (caught && typeof caught === "object" && "code" in caught && caught.code === "ENOENT") return [];
+		throw caught;
+	}
+}
+
 function piPrompt(instruction, files) {
 	if (!files.length) return instruction;
 	return `The user supplied these local document files with this request:\n${files.map((item) => `- ${item}`).join("\n")}\n\nUser request:\n${instruction || "Examine the supplied legal documents and respond appropriately."}`;
 }
 
 function progressName(toolName) {
-	return ({ reviewer_perera_start_review: "Reviewer Perera is reading the supplied document set…", reviewer_perera_continue_review: "Reviewer Perera is applying the user's answers…", reviewer_perera_get_findings: "Retrieving Reviewer Perera's clause findings…", rag_chat_research: "Researching Sri Lankan legal authorities and linked citations…", drafter_weeramantry_draft_or_revise: "Drafter Weeramantry is preparing the legal document…", translator_siriwardena_translate_document: "Translator Siriwardena is translating the document…", translator_siriwardena_translate_text: "Translator Siriwardena is translating the supplied text…", librechat_prepare_document_preview: "Preparing a local document preview…" })[toolName] || `Using ${toolName || "a specialist tool"}…`;
+	return ({ legal_read_document_set: "Reading the primary document and supporting evidence…", legal_build_clause_inventory: "Mapping clauses and paragraphs…", legal_audit_commercial_coverage: "Checking commercial-risk coverage…", legal_validate_review_findings: "Validating review findings against the source…", legal_render_review_report: "Preparing validated native review findings…", legal_precedent_search: "Searching drafting precedents…", legal_precedent_read: "Reading a selected drafting precedent…", legal_validate_draft: "Checking the native legal draft…", rag_chat_research: "Researching Sri Lankan legal authorities and linked citations…", translator_siriwardena_translate_document: "Translator Siriwardena is translating the document…", translator_siriwardena_translate_text: "Translator Siriwardena is translating the supplied text…", workbench_publish_artifact: "Publishing the completed legal file for download…", librechat_prepare_document_preview: "Preparing a local document preview…" })[toolName] || `Using ${toolName || "a specialist tool"}…`;
 }
 
 async function runPi(prompt, sessionId, onProgress) {
-	// The hosted surface exposes the legal MCP tools, never Pi's shell/edit tools.
-	// Full Pi remains available through the Windows and Docker CLI launchers.
+	// Hosted Pi uses administrator-owned legal MCP registration. Its normal built-in
+	// tools remain subject to the legal-scope extension and deployment sandbox.
 	const args = [
 		PI_CLI,
-		"--mode", "json", "--no-builtin-tools", "--session-id", sessionId,
+		"--mode", "json", "--approve", "--session-id", sessionId,
 		// Project extensions are explicit so the hosted endpoint behaves exactly
 		// like the local CLI, even when Pi's discovery configuration changes.
 		"--extension", path.join(projectRoot, ".pi", "extensions", "junior-silva-legal-context.ts"),
@@ -237,7 +248,7 @@ async function serveArtifact(res, pathname) {
 	res.end(bytes);
 }
 
-await Promise.all([mkdir(artifactsRoot, { recursive: true }), mkdir(uploadsRoot, { recursive: true }), mkdir(SESSION_ROOT, { recursive: true }), mkdir(AGENT_ROOT, { recursive: true })]);
+await Promise.all([mkdir(artifactsRoot, { recursive: true }), mkdir(uploadsRoot, { recursive: true }), mkdir(workspaceRoot, { recursive: true }), mkdir(SESSION_ROOT, { recursive: true }), mkdir(AGENT_ROOT, { recursive: true })]);
 // Hosted mode uses an administrator-owned global MCP registration. It does not
 // bypass Pi's project-trust prompt or approve arbitrary project-local code.
 await writeFile(path.join(AGENT_ROOT, "mcp.json"), `${JSON.stringify({
@@ -248,7 +259,7 @@ await writeFile(path.join(AGENT_ROOT, "mcp.json"), `${JSON.stringify({
 			cwd: projectRoot,
 			exposure: "direct",
 			timeout: 1200,
-			description: "Independent legal research, interactive review, drafting, and translation tools.",
+			description: "Independent Sri Lankan legal research, native source-anchored review, native drafting, and translation tools.",
 		},
 	},
 }, null, 2)}\n`, "utf8");
@@ -268,7 +279,8 @@ const server = createServer(async (req, res) => {
 			const candidates = fileCandidates(body);
 			if (!uploadText.instruction && !uploadText.files.length && !candidates.length) return json(res, 400, { error: { message: "A user message or document is required", type: "invalid_request_error" } });
 			const key = conversationKey(req, body);
-			const files = await saveUploads(key, candidates, uploadText.files);
+			await saveUploads(key, candidates, uploadText.files);
+			const files = await conversationUploadPaths(key);
 			const id = `chatcmpl-${randomUUID()}`;
 			const streaming = body.stream !== false;
 			if (streaming) { startStream(res, id); heartbeat = setInterval(() => res.write(": keep-alive\n\n"), 15_000); }
