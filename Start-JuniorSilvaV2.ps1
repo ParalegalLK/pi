@@ -10,6 +10,12 @@ Get-Content -LiteralPath '.env' | ForEach-Object {
     }
 }
 foreach ($name in @('GEMINI_API_KEY', 'ANTHROPIC_API_KEY')) { if ($pairs[$name]) { Set-Item -Path "Env:$name" -Value $pairs[$name] } }
+$workspaceRoot = if ($pairs['JUNIOR_SILVA_WORKSPACE_ROOT']) { $pairs['JUNIOR_SILVA_WORKSPACE_ROOT'] } else { Join-Path $PSScriptRoot 'junior-silva\workspace' }
+New-Item -ItemType Directory -Force -Path $workspaceRoot | Out-Null
+Set-Item -Path 'Env:JUNIOR_SILVA_WORKSPACE_ROOT' -Value $workspaceRoot
+foreach ($name in @('JUNIOR_SILVA_KB_ROOT', 'JUNIOR_SILVA_DATA_ROOT', 'JUNIOR_SILVA_ARTIFACT_ROOT', 'JUNIOR_SILVA_UPLOAD_ROOT')) {
+    if ($pairs[$name]) { Set-Item -Path "Env:$name" -Value $pairs[$name] }
+}
 $provider = if ($pairs['PI_PROVIDER']) { $pairs['PI_PROVIDER'] } else { 'google' }
 $model = if ($pairs['PI_MODEL']) { $pairs['PI_MODEL'] } else { 'gemini-3.7-flash' }
 $thinking = if ($pairs['PI_THINKING']) { $pairs['PI_THINKING'] } else { 'medium' }

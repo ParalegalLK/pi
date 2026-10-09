@@ -1,135 +1,128 @@
-# Junior Silva V2 — Development History
+# Junior Silva V2 — development history
 
-This history records the development of the independent Junior Silva V2 integration in this Pi repository. It deliberately excludes credentials, user documents, and runtime artifacts.
+This is a factual implementation history for engineers continuing work on Junior Silva V2. It intentionally excludes credentials, user files, session contents, and deployment-specific values.
 
-## 1. Baseline and design decision
+## Native review finalisation — two-tool surface
 
-- Junior Silva V2 was started from the official Pi `1.0.0` release.
-- It is intentionally separate from the earlier Junior Silva / Senior Barrister Bandara implementation, which used a central OpenAI-compatible workflow bridge and a managed matter workflow.
-- The core decision for V2 was to preserve Pi's own agency: Pi is given specialist capabilities and their accurate contracts, then decides whether to use a tool, which tool to use, and the order of calls.
-- No fixed review → research → draft workflow, hidden routing prompt, or matter-orchestration policy was added.
+- Replaced the fragmented production review-tool surface with `review_prepare_document_set` and `review_finalize_document`.
+- Preparation reads the whole supplied evidence set, distinguishes the primary document from annexures/supporting material, creates a clause inventory and a commercial-coverage prompt, and **does not** ask interview questions. Pi may ask a normal chat question only after examining this evidence and only where a material fact remains unresolved.
+- Finalisation accepts Pi's proposed findings, validates each exact source anchor, rejects unsupported findings, preserves authority URLs, and creates both `legal-review.md` and `Reviewed_document.docx`.
+- The renderer copies DOCX sources and applies comments/highlights at original matched text. Multi-paragraph extracted anchors fall back to the most distinctive source line. PDF/text sources produce a standalone review report rather than pretending the original file was annotated.
+- Added `bayoo-docx` to the Docker image because its compatible `add_comment` API is required for actual Word comments. The Windows wrapper maps paths safely into WSL for the portable renderer.
+- Focused tests cover tool exposure, complete evidence preparation, rejection of unsupported findings, Markdown/DOCX delivery, PDF/text report generation, and actual DOCX comment/highlight XML. A synthetic Pi CLI review also confirmed Pi selected preparation, finalisation, preview generation, and delivered both artifacts.
 
-## 2. Native MCP capability layer
+## Evidence-aware review clarification and annexure handling
 
-- A local standards-compliant stdio MCP server was added at `junior-silva/mcp/server.mjs`.
-- Project registration is in `.pi/mcp.json`, so the normal Pi CLI discovers the legal-service tools as native MCP tools.
-- The following services are exposed through focused, independently usable tools:
+- Refined the `sri-lankan-legal-review` skill and legal-context extension after testing a pleading against an underlying agreement supplied later in the conversation.
+- Pi must now read the initial prepared evidence packet before deciding whether a clarification is material. It cannot silently assume facts required by a pleading, agreement, or filing-ready document.
+- The skill directs Pi to ask focused questions for unresolved material facts and, where none remains for a substantive review, offer one optional evidence checkpoint for additional agreements, correspondence, policies, notices, asset records, or evidence.
+- A reply containing only a document path/upload is explicitly treated as newly supplied evidence. Pi must rerun `review_prepare_document_set` using the original document and all related material, read the revised packet, and reassess; it must not treat the upload as an ignored non-answer.
+- `review normally` and `skip` now close every evidence/clarification checkpoint. Pi may complete research but must finalise without another question, clearly recording residual evidence gaps or assumptions.
+- End-to-end CLI verification used a draft plaint and a later-supplied employment agreement. The second packet contained both documents; findings identified source-grounded inconsistencies including the pleaded employment/salary characterization versus the underlying internship/stipend agreement and an unsupported physical-laptop recovery claim. The final DOCX contained embedded Word comments and highlight/shading XML.
 
-  - **Reviewer Perera V2** — starts an interactive review, continues it only with a later real user answer, and retrieves structured findings.
-  - **RAG Chat Server** — provides Sri Lankan legal research while retaining structured responses and authority links.
-  - **Drafter Weeramantry** — creates or revises legal documents and returns localized deliverables.
-  - **Translator Siriwardena** — translates either documents or supplied text without unnecessarily invoking drafting.
+## Foundation — Pi 1.0 and capability-first design
 
-- Tool descriptions state capabilities, input/output contracts, and interactive boundaries. They do not instruct Pi to follow a preset multi-service workflow.
+- Junior Silva V2 was created from the official Pi 1.0.0 codebase rather than modifying Junior Silva V1 / Senior Barrister Bandara.
+- The design choice was to expose neutral specialist capabilities and let Pi select them. No central workflow engine, mandatory review → research → draft sequence, hidden matter router, or per-task orchestration prompt was added.
+- A local stdio MCP server was registered in .pi/mcp.json with direct exposure.
 
-## 3. Files, artifacts, and cross-service hand-off
+## Initial legal-service MCP integration
 
-- `junior-silva/core/document-text.mjs` extracts and packages PDF/DOCX/text inputs. Related documents and annexures are labelled in a combined review packet when a review tool receives several files.
-- `junior-silva/core/files.mjs` validates local input paths, supported formats, filenames, output origins, and downloads.
-- Service outputs are localized under `junior-silva/artifacts/<operation-id>/` on Windows, or `/data/artifacts/<operation-id>/` in Docker.
-- Tool results return safe local artifact paths and protected links rather than exposing a provider's private download URL.
-- Runtime uploads, sessions, audits, and artifacts are intentionally excluded from Git.
+Implemented junior-silva/mcp/server.mjs and the service adapters under junior-silva/services.
 
-## 4. Interactive review behaviour
+- **Reviewer Perera V2:** separated start, continuation and findings retrieval because Reviewer is interactive and asynchronous.
+  - Tool descriptions require Pi to surface Reviewer’s real questions and wait for the user’s later reply.
+  - Pi must not manufacture “review normally” or “skip.”
+  - The adapter can package a main agreement plus annexures into a labeled combined review packet.
+- **RAG Chat Server:** returns the research answer, delivery metadata and linked authorities.
+- **Drafter Weeramantry:** downloads produced DOCX/Markdown/PDF deliverables into local artifact storage.
+- **Translator Siriwardena:** exposes separate document and text translation paths so a simple translation does not invoke drafting.
+- **Public web search:** added Serper-based current-public-source search for Gazettes, current legal developments, international legal questions and other material outside the stable domestic corpus.
+- **Data-only code runner:** added isolated JavaScript calculations/table reshaping. It is deliberately not a shell or document-production tool.
 
-- Reviewer Perera is asynchronous and may ask legal-context questions before it can produce an annotated review.
-- V2 therefore separates `start_review` from `continue_review` rather than auto-answering the reviewer.
-- The start result explicitly tells Pi that the questions must be shown to the user and that Pi must wait for a later reply.
-- The continuation tool accepts the user’s actual reply, including a user choice such as “review normally” or “skip”, and returns the completed annotated DOCX once available.
-- A completed review can be used as input to a later RAG, drafting, or translation request only when the user asks for that work.
+## Artifact handling and cross-service file hand-off
 
-## 5. Citation quality and legal research
+- Added core/files.mjs, core/document-text.mjs, core/http.mjs, and core/environment.mjs.
+- Inputs are extension/size validated and service outputs are localized under an operation-specific artifact directory.
+- HMAC-protected download tokens prevent the UI from exposing upstream private Drafter/Reviewer file links.
+- Upload-as-Text and provider uploads are turned into private local files. Multiple related files can be passed to the review tool together.
+- Runtime artifacts, uploads, sessions, workspace files, agent state and .env are ignored by Git and excluded from Docker build context.
 
-- The RAG tool contract was refined so that Pi must preserve the RAG service’s substantive answer, headings, conclusion, and Markdown hyperlinks to cases, legislation, books, and other authorities.
-- A Pi extension at `.pi/extensions/legal-research-citation-delivery.ts` reinforces this delivery requirement. It is a presentation safeguard, not a legal-research workflow controller.
-- This addresses an early issue where Pi would paraphrase RAG output and accidentally strip useful authority links.
+## Citation-preserving legal research delivery
 
-## 6. Local CLI and Docker/OpenAI endpoint
+- Direct RAG answers are delivered verbatim when research itself is the requested final work product; this retains RAG’s headings, conclusion and Markdown authority links.
+- Composite requests—such as “research then draft an email”—were losing links during Pi synthesis. legal-research-citation-delivery.ts was added to observe RAG results, collect authority links, find retained authority names in the final response, and restore original Markdown links.
+- The extension does not invent citations, overwrite existing links, or force a linked-authority appendix when links are already present.
 
-- `Start-JuniorSilvaV2.ps1` launches the ordinary interactive Pi CLI on Windows and retains Pi’s usual UI and built-in capabilities.
-- `Dockerfile` and `docker-compose.yml` add a Docker deployment for WSL.
-- The Docker service runs an OpenAI-compatible HTTP/SSE bridge at `junior-silva/server/openai.mjs`.
-- It exposes model `junior-silva-v2` on host port `8132` (container port `8126`), avoiding the port already occupied locally by Reviewer Perera V2.
-- The hosted endpoint uses `--no-builtin-tools`, exposing only the legal MCP capability set to LibreChat users; the direct Pi CLI remains unrestricted.
-- MCP progress notifications are converted to `reasoning_content`, allowing compatible clients to display service status as visible thoughts.
+## Legal scope, current-time awareness and document-skill usage
 
-## 7. Upload and attachment handling
+- Added junior-silva-legal-context.ts as the product-policy extension.
+- It gives Junior Silva’s greeting, rejects clearly unrelated tasks, and adds a legal-only policy on every agent run.
+- It supplies the current Asia/Colombo date/time at runtime so current-law/news questions are interpreted against the real date rather than model-training assumptions. This does **not** discard older case law or Acts; relevance remains a question of legal role and the user’s question.
+- Document skills copied from LibreChat were placed in .agents/skills: DOCX, legal DOCX, PDF, PPTX, XLSX, writing-style and doc coauthoring.
+- Hosted Pi was changed to allow Pi’s built-in execution tools. This enables Pi to read a skill, execute its scripts/code and create legal presentations, spreadsheets, PDFs and documents. The same extension blocks misuse of Drafter for PPTX/XLSX/visual artifacts and directs Pi to matching skills plus artifact publishing.
+- This is intentionally functional rather than fully sandboxed; see the security note in Overview.md before exposing it to untrusted public users.
 
-- Standard provider/data-URL attachments are supported.
-- LibreChat-style “Upload as Text” envelopes are reconstructed as private Markdown upload files so Pi can pass meaningful content to the appropriate legal tool.
-- Attachment fetching is restricted to configured origins; redirect handling, input-size limits, and file-type validation are enforced.
-- These protections prevent arbitrary URL fetches and keep uploaded legal material inside the V2 runtime boundary.
+## OpenAI-compatible service and LibreChat integration
 
-## 8. Skills
+- Added junior-silva/server/openai.mjs and Docker support.
+- The service exposes /health, /v1/models, /v1/chat/completions, and protected artifact downloads.
+- Pi’s streamed specialist-tool progress is converted into OpenAI-compatible SSE reasoning_content, enabling LibreChat visible status/thought updates.
+- The bridge starts Pi with all three Junior Silva extensions and uses the configured provider/model/think level.
+- Conversation work is serialized per conversation key to prevent overlapping turns from corrupting an interactive review sequence.
+- Compose uses the junior-silva-v2 service on container port 8126, published at host 127.0.0.1:8132, plus an optional interactive CLI profile.
 
-- LibreChat document-related skills were copied under `.agents/skills/` for use by interactive Pi where appropriate.
-- The copied skills include document, PDF, presentation, spreadsheet, legal-DOCX, co-authoring, and writing-style materials together with their supporting resources.
-- They are supporting capabilities only. No new Junior Silva workflow skill was introduced.
+## LibreChat artifact previews
 
-## 9. Validation performed
+- Added workbench_publish_artifact, librechat_prepare_document_preview, core/previews.mjs, services/preview.mjs, and librechat-preview-delivery.ts.
+- The legal-context extension now directs Pi to normally preview the single primary completed artifact in LibreChat while avoiding short chat-only emails, intermediate assets and duplicate formats.
+- The preview-delivery extension makes preview markup deterministic once Pi elected to call the preview tool.
+- Supported preview formats are DOCX, reviewed DOCX, PDF, PPTX, XLSX, Markdown, TXT and JSON.
+- Reviewed DOCX previews parse Word comment ranges and place comments beside matched source clauses in derived HTML. This corrected the earlier poor preview that collected all comments in one place. The original annotated Word document is unchanged.
+- PPTX previews show extracted slide text in a gallery; XLSX previews show a bounded worksheet/table inspection. These are inspection views, not replacements for native Office rendering.
 
-- Pi reported version `1.0.0`, and the MCP server connected with the expected legal tools.
-- A related three-document agreement/annexure review was combined into one packet; Pi presented Reviewer Perera’s actual questions and waited for the user response.
-- The subsequent user response completed the same review, retained a Background-IP concern, reported clause 6.1 findings, and produced a valid annotated DOCX.
-- LibreChat-style Upload as Text content was reconstructed and tested through the interactive review path.
-- Reviewer and Drafter deliverables were localized; protected DOCX/Markdown download routes returned valid files and MIME types.
-- The Docker endpoint independently selected RAG for a legal question and retained linked Lex/NLR/SLLR authorities and structured sections.
-- The Docker endpoint independently selected Translator Siriwardena and returned translated Sinhala text.
-- The image built successfully, passed its health check, and the Docker CLI reported Pi `1.0.0`.
+## Testing and documentation
 
-## 10. Known operational limitations
+- Added focused unit coverage for file safety, citation delivery and Colombo temporal context under junior-silva/test.
+- Added TESTING.md with a required focused-first test order, preview checks and the wider regression checklist: web/RAG/drafting/translation, combined research, citation links, document-skill output, legal scope, uploads, multiple document review and prompt/secrets protection.
+- Manual focused preview tests successfully exercised DOCX, reviewed DOCX, PDF, Markdown, PPTX and XLSX preparation, as well as final Artifact-markup injection.
+- git diff --check, targeted Node syntax checks, and focused V2 tests have been used for validation.
+- The upstream Pi full check is currently blocked by an unrelated generated-model typing mismatch in packages/ai/test/together-models.test.ts: DeepSeek-V4-Pro is not in the generated Together model union. Future maintainers should not change that unrelated upstream test merely to validate Junior Silva V2 work.
 
-- Drafter turnaround remains dependent on Drafter Weeramantry’s external queue/model capacity. The V2 adapter preserves provider progress and has bounded timeouts, but does not modify the Drafter service itself.
-- Service credentials and published URLs are runtime configuration in `.env`; they are not source-controlled.
-- A production LibreChat deployment still needs its own endpoint/reverse-proxy configuration and the public artifact URL to be set for that environment.
+## Docker build compatibility fix
 
-## 11. Repository and secrecy policy
+- Docker builds encountered an OverlayFS cross-device rename error while hydrate:model-data attempted to replace the copied packages/ai/src/providers/data directory.
+- The V2 Dockerfile now removes that generated directory before npm run hydrate:model-data and npm run build:offline, allowing the generator to recreate it in one writable layer.
 
-- `.env` is ignored. `.env.example` contains empty placeholder values and safe defaults only.
-- Generated artifacts, uploaded source documents, session transcripts, audit traces, and dependencies are ignored.
-- API keys, integration tokens, user documents, provider URLs containing credentials, and temporary service outputs must never be force-added or committed.
-- Before any commit, inspect `git status --short`, `git diff --cached`, and the staged file list. Commit source/config templates only.
+## Native review and drafting migration
 
-## 12. Current development state
+- Replaced the production MCP exposure of Reviewer Perera V2 and Drafter Weeramantry with Pi-native legal tools. Their adapter files remain temporarily for rollback/reference, but the production MCP server no longer declares or routes to them.
+- Added `core/native-review.mjs`: it reads a primary document with all supporting evidence, produces a source clause inventory, applies the nine-dimension commercial-coverage challenge adapted from Reviewer V3, validates every proposed finding against its original anchor text, and renders reports from accepted findings only.
+- Added `core/precedents.mjs`: it searches and reads a private, read-only external drafting corpus with bounded excerpts, explicitly treating it as structural precedent rather than legal authority. It also checks final textual drafts for unresolved placeholders.
+- Added the `sri-lankan-legal-review` and `sri-lankan-legal-drafting` skills. These tell Pi to inspect evidence first, use RAG for Sri Lankan legal propositions, keep safe clauses in revisions, produce before/after comparisons for material amendments, and never disclose precedent paths or confidential source material.
+- Updated the OpenAI bridge so each turn supplies every upload already attached to the same conversation, not only files uploaded in the latest message. This lets later employment agreements, annexures, or supporting evidence materially inform review/drafting rather than being mistaken for a text-only answer.
+- Added focused deterministic native-review tests for multi-document packets, anchor acceptance/rejection, coverage evidence, generated review reports, and placeholder detection.
 
-- The working branch is `dev`, based on Pi `1.0.0`.
-- The V2 implementation files are currently local worktree changes awaiting a deliberate user-controlled review, stage, commit, and push.
-- No commit or push is made as part of this history update.
+## Windows CLI legal-DOCX recovery
 
-## 13. Citation delivery and optional LibreChat previews
+- A local CLI plaint test revealed that the launcher did not export/create `JUNIOR_SILVA_WORKSPACE_ROOT`. Pi consequently chose an undeclared project `tmp` path, and its Markdown validator initially raced a missing file.
+- The Windows launcher now creates and exports the configured workspace before Pi starts. Draft validation now rejects an empty file rather than incorrectly returning a clean result.
+- The normal legal-DOCX build script requires Bash/Pandoc. Windows/Git-Bash had no Pandoc, so a portable WSL/Python-docx renderer and PowerShell wrapper were added to the legal-DOCX skill. Pi uses that route when the full pipeline is unavailable, writes the Markdown and DOCX in the configured workspace, then can publish/preview the DOCX normally.
 
-- The RAG adapter now returns a structured authority bundle in addition to its normal linked research answer.
-- Research calls identify whether RAG is the direct final answer or support for a separate user-requested work product. This prevents a research-backed email or letter from losing the original case/legislation URLs during synthesis.
-- The citation-delivery extension preserves existing links, restores matching authority links in combined responses, and adds a small linked-authority section only when a combined answer would otherwise lose every available authority link.
-- An optional `librechat_prepare_document_preview` MCP tool was added. Pi may choose it for substantial completed deliverables. It renders Markdown natively and produces local sanitized HTML previews for DOCX and PDF files.
-- Reviewed-DOCX preview generation reads Word comments and anchors from OOXML and places reviewer notes beside the matching rendered clauses. The original downloadable DOCX/PDF is not modified.
+## Current branch state and handoff
 
-## 14. Tool-routing, citation, web, and code-runner refinements (5 October 2026)
+- Current deployment branch: **feat/deployment-test**.
+- Recent V2 commits include:
+  - a1dad37d8 — initial Junior Silva V2 legal MCP workbench.
+  - 3c3815f7c — LibreChat artifact previews, PPTX/XLSX preview support, preview delivery policy and TESTING.md.
+- There is a separate dev branch containing earlier legal-scope and chronology work. The deployment branch has the current V2 integration and should be treated as the source of truth for this worktree.
+- Before deploying a newer commit, rebuild/recreate junior-silva-v2, check /health, check an MCP-dependent legal route, and then run focused tests for the changed feature before the full TESTING.md suite.
 
-- Citation preservation was corrected at the delivery boundary rather than by changing RAG Chat. The citation-delivery extension now recognises the actual native MCP research tool name (`rag_chat_research`, including Pi's namespaced variants), reads both textual and structured authority results, preserves already-linked Markdown, and restores a compact **Linked authorities supporting this draft** section only if a research-backed combined deliverable would otherwise lose every authority link.
-- This specifically covers the difference between a direct research answer (where Pi generally returned RAG's answer verbatim) and a combined task such as “research, then draft an email”, where a later model synthesis had previously reduced linked citations to plain case or Act names.
-- Drafter Weeramantry's MCP description was narrowed to its intended role: downloadable formal legal instruments, substantial legal-document revisions, or requested DOCX/PDF/Markdown work products. It expressly tells Pi not to use Drafter for ordinary emails, short complaint letters, chat replies, summaries, or legal research. Those should normally be written directly in chat unless the user expressly requests a formatted downloadable document.
-- Added optional public-web research and a sandboxed data-transform capability to the MCP service. Public web research currently discovers sources through Serper; the configuration also holds optional Firecrawl and Jina settings for a subsequent verified-fetch/rerank stage. The data runner is deliberately limited to data-only JavaScript transformations and blocks filesystem, process, shell, network, module-loading, and dynamic-code facilities.
-- Runtime feature flags and credentials remain in `.env` only. The web and code facilities can be enabled or disabled independently without changing Pi's legal-service contracts.
-- Validation covered MCP registration, JavaScript syntax checks, web-search discovery, isolated data transformation, explicit RAG research with authority links, and a research-backed drafting response. A Gemini 3.7 Flash test confirmed the configured runtime model and successful linked-authority restoration.
+## Pending engineering priorities
 
-## 15. Outstanding temporal-grounding improvement
-
-- A current-events test exposed that Pi itself was not supplied with a runtime “current date” context. It incorrectly described a September 2026 event as future despite the runtime date being 5 October 2026 (Asia/Colombo).
-- This is a temporal-grounding defect, not a reason to restrict historical searches. The planned correction is to inject the live Asia/Colombo date into every Pi request and web-research result, then require current-status answers to distinguish event, publication, and legal-commencement dates against that runtime reference.
-
-## 16. Legal scope and runtime chronology safeguards (6 October 2026)
-
-- Added a Junior Silva Pi extension that constrains both the interactive CLI and the OpenAI-compatible endpoint to Sri Lankan legal work. It gives the requested Junior Silva greeting for a simple greeting and declines clearly non-legal requests such as ordinary coding, essays, and casual tasks.
-- The hosted endpoint already uses `--no-builtin-tools`; the local launcher now uses the same legal-only tool boundary. Legal MCP tools remain available in both environments.
-- Added a live `Asia/Colombo` clock to Pi's system context, RAG requests, and public-web research results. It tells the model to evaluate dates against the actual runtime date and to distinguish event, publication, Gazette, and commencement dates. It does not contain an instruction to discard or downgrade older legal authorities.
-- The code-runner remains the existing data-only transformation tool. A general arbitrary-code executor was not added because it would require a separately approved, properly isolated execution service.
-
-## 17. Built-in skill execution for legal artifact work (6 October 2026)
-
-- Pi's normal built-in tools are enabled for the Windows CLI, Docker CLI, and hosted OpenAI-compatible endpoint. This allows Pi to read the discovered document skills and execute their documented Python, Node, and supporting commands when preparing a legal work product.
-- The existing Junior Silva legal-scope extension remains active in every launch path. It returns the prescribed greeting, intercepts plainly non-legal requests before an agent run, and supplies the Sri Lankan legal-only service instructions to Pi.
-- The hosted path uses Pi's non-interactive approval mode so a legal document skill can complete its approved commands during a LibreChat request. LibreChat itself receives only the final answer, status updates, and protected artifacts.
-- Added one general `workbench_publish_artifact` MCP tool and a dedicated writable workspace. It publishes a final PPTX, XLSX, DOCX, PDF, Markdown, text, or JSON artifact created by any discovered skill without exposing the workspace itself. This avoids a service-specific publishing tool for every future skill.
-- The V2 container now includes the presentation runtime required by the bundled PPTX skill: LibreOffice Impress, Playwright Chromium, PptxGenJS, React, React DOM, React Icons, Sharp, and Python's defusedxml support. Drafter's tool description now expressly excludes presentations, slide decks, spreadsheets, and other visual/data artifacts so Pi can select a discovered document skill instead.
-- Playwright's browser cache is copied to a shared read-only runtime location in the image, so the non-root Pi process does not have to download Chromium again for each presentation request.
+1. Add source/authority and quotation verification rather than relying solely on retrieved citation links.
+2. Implement robust per-user/matter authorization, data retention, deletion and audit controls for production multi-user deployment.
+3. Place the full Pi built-in execution environment inside a stronger isolated workspace/egress sandbox if external/untrusted users retain access.
+4. Add adversarial OOXML/ZIP preview tests and improve native visual fidelity for PPTX/PDF/XLSX previews where needed.
+5. Decide whether to wire Firecrawl/Jina into services/web.mjs; their environment configuration exists but the current code only calls Serper.
+6. Build a golden legal-answer/review evaluation set with verified Sri Lankan authorities, expected citation links, and regression assertions.

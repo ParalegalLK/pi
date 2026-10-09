@@ -21,6 +21,8 @@ services:
       RAG_BASE_URL: http://rag-chat-server-legal-search-api-1:8123
       DRAFTER_BASE_URL: http://drafter-weeramantry:8033
       TRANSLATOR_BASE_URL: ${TRANSLATOR_BASE_URL:-https://www.devtranslate.paralegal.lk/api}
+
+      JUNIOR_SILVA_KB_ROOT: /kb
     ports:
       - "127.0.0.1:8132:8126"
     volumes:
@@ -31,6 +33,7 @@ services:
       - ./junior-silva/workspace:/data/workspace
       - ./junior-silva/sessions:/data/sessions
       - ./junior-silva/pi-agent:/data/pi-agent
+      - ${JUNIOR_SILVA_KB_HOST_PATH:-./junior-silva/empty-kb}:/kb:ro
     networks:
       - librechat
       - rag
@@ -54,6 +57,7 @@ services:
       RAG_BASE_URL: http://rag-chat-server-legal-search-api-1:8123
       DRAFTER_BASE_URL: http://drafter-weeramantry:8033
       TRANSLATOR_BASE_URL: ${TRANSLATOR_BASE_URL:-https://www.devtranslate.paralegal.lk/api}
+      JUNIOR_SILVA_KB_ROOT: /kb
     command: ["node", "junior-silva/cli/docker-cli.mjs"]
     stdin_open: true
     tty: true
@@ -65,6 +69,7 @@ services:
       - ./junior-silva/workspace:/data/workspace
       - ./junior-silva/sessions:/data/sessions
       - ./junior-silva/pi-agent:/data/pi-agent
+      - ${JUNIOR_SILVA_KB_HOST_PATH:-./junior-silva/empty-kb}:/kb:ro
     networks:
       - librechat
       - rag

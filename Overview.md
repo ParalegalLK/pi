@@ -1,383 +1,289 @@
-# Junior Silva V2 — implemented architecture and operation
+# Junior Silva V2 — engineering handover
 
-Junior Silva V2 is implemented on the official Pi `1.0.0` codebase. It deliberately has no central workflow engine, prescribed review→research→draft sequence, matter router, or hidden task-specific prompt. Pi receives a small set of accurately described specialist tools through native MCP and independently decides whether to call them, in what order, or not at all.
+Junior Silva V2 is a Sri Lankan legal-assistant integration built on the official Pi 1.0.0 codebase. It is deliberately a **thin capability layer**, not a workflow engine: Pi sees independent specialist tools through MCP and chooses whether to use them, in what order, and with which returned files.
 
-```text
-Windows Pi CLI or LibreChat
-            ↓
-          Pi 1.0
-            ↓ native MCP tool selection
-Junior Silva Legal Services MCP (stdio)
-    ├── Reviewer Perera V2 — interactive single/multi-document review
-    ├── RAG Chat Server — linked Sri Lankan legal research
-    ├── Drafter Weeramantry — drafting and revision with local artifacts
-    ├── Translator Siriwardena — text and document translation
-    └── LibreChat preview preparation — optional local artifact rendering
-```
+The current deployment branch is **feat/deployment-test**. The upstream Pi base is preserved in the same repository; this document identifies the application-specific handover surface.
 
-## Implemented repository layout
+## Design principles
 
-```text
+- **Pi decides the sequence.** There is no mandatory review → research → draft pipeline, matter router, or task-specific orchestration prompt.
+- **Tools describe contracts, not workflows.** Each MCP tool says what it can do, what it needs, and what it returns. Pi uses source-anchored native review/drafting tools and asks for user facts only after it has read the available evidence.
+- **Legal-only product boundary.** The legal-context extension handles greetings and clearly non-legal requests and appends legal-only policy on every agent run.
+- **Sri Lankan legal focus.** Stable domestic research goes to RAG Chat Server; current/public developments can use web search; Pi may use both where a current source could change a stable legal rule.
+- **Localize service artifacts.** Provider download links are never shown as user-facing links. Returned files are downloaded to controlled artifact folders and exposed through HMAC-protected download URLs.
+- **Preserve sources.** Direct RAG research is delivered verbatim. In composite work, known RAG authority links are restored where the final text retains the associated authority.
+- **The original file remains authoritative.** LibreChat previews are read-only derived views; they never alter DOCX, PDF, PPTX, XLSX, Markdown, or other source artifacts.
+
+## Runtime architecture
+
+~~~text
+                         ┌───────────────────────────────────────┐
+Windows Pi CLI ─────────►│ Pi coding agent                         │
+LibreChat custom endpoint│ legal scope + chronology extension      │
+                         │ citation delivery + preview extension  │
+                         └──────────────┬────────────────────────┘
+                                        │ native stdio MCP
+                         ┌──────────────▼────────────────────────┐
+                         │ Junior Silva Legal Services MCP         │
+                         └─┬────────┬─────────┬─────────┬────────┘
+                           │        │         │         │
+                    Native review  RAG Chat  Native drafting  Translator
+                           │        │         │         │
+                           └────────┴────┬────┴─────────┘
+                                        │
+                      local uploads / workspace / artifacts
+                                        │
+                         ┌──────────────▼────────────────────────┐
+                         │ protected downloads + optional          │
+                         │ LibreChat side-panel artifact previews  │
+                         └────────────────────────────────────────┘
+~~~
+
+### Entry points
+
+| Entry point | Purpose |
+| --- | --- |
+| Start-JuniorSilvaV2.ps1 | Windows launcher for interactive Pi/TUI use. |
+| junior-silva/cli/docker-cli.mjs | Starts the same Pi configuration in the optional Docker CLI profile. |
+| junior-silva/server/openai.mjs | OpenAI-compatible HTTP/SSE endpoint used by LibreChat. |
+| junior-silva/mcp/server.mjs | Standards-compliant stdio MCP server exposing specialist tools. |
+
+The HTTP endpoint provides /health, /v1/models, /v1/chat/completions, and protected artifact-download routes. It serializes a conversation key so related turns do not race each other, translates MCP progress into SSE reasoning_content, and persists Pi sessions beneath the configured data root.
+
+## Full Junior Silva V2 file structure
+
+This intentionally omits ordinary upstream Pi source folders such as packages and scripts.
+
+~~~text
 pi/
-├── .agents/skills/                  copied LibreChat document skills
-├── .pi/mcp.json                     project MCP registration
+├── .agents/
+│   └── skills/                              copied artifact-production skills
+│       ├── doc-coauthoring/                 optional coauthoring guidance
+│       ├── docx/                            DOCX generation, OOXML and helpers
+│       ├── legal-docx-build/                legal numbering/rendering scripts
+│       ├── pdf/                             PDF extraction, creation and checks
+│       ├── pptx/                            PowerPoint creation and utilities
+│       ├── sri-lankan-legal-drafting/       native legal-drafting decision guidance
+│       ├── sri-lankan-legal-review/         evidence-first native review guidance
+│       ├── writing-style/                   writing-quality guidance
+│       └── xlsx/                            workbook creation/recalculation guidance
+├── .pi/
+│   ├── mcp.json                             registers the local direct MCP server
+│   └── extensions/
+│       ├── junior-silva-legal-context.ts    scope, greeting/refusal, Colombo time,
+│       │                                    artifact-skill instructions and preview policy
+│       ├── legal-research-citation-delivery.ts
+│       │                                    preserves/restores RAG authority hyperlinks
+│       └── librechat-preview-delivery.ts    inserts prepared Artifact markup into final output
 ├── junior-silva/
-│   ├── cli/docker-cli.mjs           full interactive Pi inside Docker
+│   ├── cli/
+│   │   └── docker-cli.mjs                   Docker CLI launcher with the three extensions
 │   ├── core/
-│   │   ├── document-text.mjs        PDF/DOCX extraction and multi-file packets
-│   │   ├── environment.mjs          .env loader and data locations
-│   │   ├── files.mjs                validation, localization, protected links
-│   │   └── http.mjs                 JSON/SSE service clients
-│   ├── mcp/server.mjs               standards-compliant stdio MCP server
-│   ├── server/openai.mjs            OpenAI-compatible HTTP/SSE endpoint
-│   └── services/                    reviewer, RAG, drafter, translator adapters
-├── Dockerfile
-├── docker-compose.yml
-├── Start-JuniorSilvaV2.ps1
-├── .env                             real local settings; ignored by Git
-└── .env.example                     safe configuration template
-```
+│   │   ├── document-text.mjs                PDF/DOCX/text extraction; multi-file review packets
+│   │   ├── environment.mjs                  .env loader and configured runtime roots
+│   │   ├── files.mjs                        validation, localization, HMAC links, publishing
+│   │   ├── http.mjs                         JSON/SSE request helpers and redacted diagnostics
+│   │   ├── legal-research.mjs               extracts RAG authorities/delivery metadata
+│   │   ├── native-review.mjs                source anchors, clause inventory, coverage audit, validated reports
+│   │   ├── precedents.mjs                   read-only private drafting-precedent retrieval and draft hygiene
+│   │   ├── previews.mjs                     safe DOCX/PDF/PPTX/XLSX/Markdown/text/JSON previews
+│   │   └── time.mjs                         Colombo temporal context for current-source research
+│   ├── mcp/
+│   │   └── server.mjs                       MCP protocol implementation and tool declarations
+│   ├── review/
+│   │   ├── render_review_docx.py            source-anchored DOCX comments/highlights renderer
+│   │   └── render_review_docx.ps1           Windows/WSL renderer wrapper
+│   ├── server/
+│   │   └── openai.mjs                       OpenAI-compatible LibreChat bridge and SSE progress
+│   ├── services/
+│   │   ├── code-runner.mjs                  isolated JSON-only JavaScript transformation runner
+│   │   ├── drafter.mjs                      legacy adapter retained temporarily; not exposed by production MCP
+│   │   ├── preview.mjs                      presentation adapter around core/previews
+│   │   ├── rag.mjs                          RAG Chat Server adapter and authority extraction
+│   │   ├── reviewer.mjs                     legacy adapter retained temporarily; not exposed by production MCP
+│   │   ├── translator.mjs                   document/text translator adapters
+│   │   └── web.mjs                          Serper legal-news/current-law search
+│   └── test/
+│       ├── files.test.mjs                   artifact/input safety tests
+│       ├── legal-research.test.mjs          linked-authority delivery tests
+│       ├── mcp-native-tools.test.mjs         native review/drafting MCP contract tests
+│       ├── native-review.test.mjs            document-set, anchors and review rendering tests
+│       ├── time.test.mjs                    Colombo temporal-context tests
+│       └── fixtures/                        non-sensitive test fixtures
+├── .dockerignore                            keeps secrets/runtime data out of Docker context
+├── .env                                     local/server secrets; ignored by Git
+├── .env.example                             safe configuration template
+├── .gitignore                               excludes secrets, sessions, uploads and artifacts
+├── Dockerfile                               Pi build plus V2 runtime image
+├── docker-compose.yml                       HTTP service and optional interactive CLI profile
+├── Start-JuniorSilvaV2.ps1                  Windows Pi launcher
+├── TESTING.md                               focused-first acceptance and regression checklist
+├── Overview.md                              this operational handover
+└── History.md                               chronological implementation record
+~~~
 
-## Tool behavior
+## Agent policy and extensions
 
-- `reviewer_perera_start_review` accepts one document or a related document set. For multiple files it extracts and labels the primary agreement and annexures in one combined review packet. When Reviewer Perera asks questions, the result explicitly requires a later user reply; Pi presents the questions and ends its turn.
-- `reviewer_perera_continue_review` accepts only the later user's real answer. It preserves the original legal objective, waits safely for Reviewer Perera's asynchronous job, and returns the localized annotated `Reviewed_document.docx`.
-- `reviewer_perera_get_findings` returns the protected structured clause findings for an already completed review.
-- `rag_chat_research` returns the RAG service's client-ready research. Its contract tells Pi to retain the service's substantive structure, conclusion, and Markdown links to cases, legislation, and books. It distinguishes a direct research answer from research supporting a separate work product, so citation links survive synthesis into an email or letter.
-- `drafter_weeramantry_draft_or_revise` accepts instructions plus optional local source files. Remote Drafter outputs are downloaded locally and returned as protected DOCX/Markdown/PDF artifacts.
-- `translator_siriwardena_translate_document` and `translator_siriwardena_translate_text` expose document and direct-text translation separately, preventing unnecessary drafting calls for plain translation.
-- `librechat_prepare_document_preview` is an optional presentation tool. Pi may use it when the user asks to inspect a completed DOCX, PDF, Markdown, text, or JSON deliverable. It creates a sanitized LibreChat Artifact preview and never changes the source file.
+### junior-silva-legal-context.ts
 
-All specialist services emit MCP progress notifications. The OpenAI-compatible bridge converts those to `reasoning_content`, which LibreChat can display as the visible thought/status stream.
+This is the **product policy extension**, not a hidden workflow. Pi loads it explicitly from both the Windows/Docker CLI launcher and the OpenAI bridge. Because Pi invokes its before_agent_start handler before every agent run, its appended system-prompt section is the effective top-level Junior Silva policy.
 
-For RAG-only requests, the exact linked RAG response is delivered verbatim. For combined requests, a citation-delivery extension restores known original links where an authority label is retained and adds a concise linked-authority section only if the combined work product would otherwise contain none.
+It provides:
 
-## Files and downloads
+- the Junior Silva legal greeting;
+- a lightweight refusal for clearly non-legal requests;
+- a system policy limiting work to Sri Lankan legal work and refusing prompt, credential, service-address, source-code, and internal-architecture extraction;
+- the live Asia/Colombo date and time, so the agent does not treat already-past dates as future merely from model-training assumptions;
+- directions to use discovered document skills and publish final skill-created artifacts;
+- directions to read the native Sri Lankan legal review/drafting skills and to use their source-anchored tools;
+- a default instruction to prepare one LibreChat preview for an eligible final artifact.
 
-Generated files are localized under `junior-silva/artifacts/<operation-id>/` on Windows or `/data/artifacts/<operation-id>/` in Docker. Tool results include a local `file_uri` and a protected HMAC download URL. Drafter's private `/files/...` links are never passed directly to the user.
+The agent still decides whether tools are needed and how to answer a legal request. The extension does not prescribe a service sequence.
 
-LibreChat “Upload as Text” envelopes are normalized into private Markdown files under the upload directory. Ordinary data-URL/provider attachments are supported, while HTTP attachment retrieval is restricted to `JUNIOR_SILVA_ATTACHMENT_ORIGINS` and redirects are rejected. Upload size and file-type checks apply.
+### legal-research-citation-delivery.ts
 
-## Running Pi directly on Windows
+RAG returns a formatted answer and links found in that answer. This extension observes RAG tool results. For research-only requests it substitutes the direct RAG answer exactly; for composite work it recognizes retained authority names and restores the corresponding original Markdown links. It avoids inventing citations and does not alter an existing Markdown link.
 
-```powershell
+### librechat-preview-delivery.ts
+
+When Pi calls librechat_prepare_document_preview, this extension captures the safe Artifact markup returned by the tool and appends it deterministically to the final assistant response. LibreChat then renders the side-panel/canvas artifact. Pi remains responsible for deciding that a preview is appropriate.
+
+## MCP tools and contracts
+
+All tools are declared in junior-silva/mcp/server.mjs and exposed directly by .pi/mcp.json.
+
+| Tool | What it does | Important contract |
+| --- | --- | --- |
+| review_prepare_document_set | Reads the complete primary/supporting evidence set, maps the primary document, and checks commercial coverage. | Does not interview the user. Pi reads the returned evidence before deciding whether a question is genuinely necessary. |
+| review_finalize_document | Validates proposed findings against the prepared source and creates legal-review.md plus Reviewed_document.docx. | Unsupported anchors are rejected. DOCX inputs receive source-positioned Word comments/highlights; PDF/text inputs receive a standalone professional review report. |
+| legal_precedent_search / legal_precedent_read | Read a bounded excerpt from a private, read-only drafting corpus. | Structure only, never legal authority or user-visible source material. |
+| legal_validate_draft | Finds unresolved placeholders and basic hygiene issues in a draft. | Legal propositions still require RAG validation. |
+| rag_chat_research | Queries Sri Lankan legal research with authority links. | direct_answer is for research as the final answer; supporting_work_product is for research underpinning an email, letter, complaint, etc. |
+| translator_siriwardena_translate_document | Translates a supported document. | Returns localized generated files where the service provides them. |
+| translator_siriwardena_translate_text | Translates supplied text. | Avoids unnecessary document drafting. |
+| web_search_public_legal_sources | Searches current public legal/news sources. | No client personal facts in query; use RAG too when current sources may change stable law. |
+| code_runner_data_transform | Executes a small deterministic JavaScript calculation/table transform. | No network, filesystem, modules, shell, or document creation. |
+| workbench_publish_artifact | Publishes a final skill-created workspace artifact. | Only final user-facing artifact files in the configured workspace. |
+| librechat_prepare_document_preview | Generates a side-panel preview for a final artifact. | Preview once per primary final file; never replaces the original download. |
+
+### Evidence-aware review conversation
+
+The review skill supplies a flexible evidence protocol rather than a fixed service workflow:
+
+1. Pi prepares and reads the complete supplied document set before asking any question.
+2. It asks focused questions only for material facts unsupported by that evidence (for example, the operative term, notice, asset record, loss proof, party identity, jurisdiction, or procedural act).
+3. Where a substantive pleading or agreement leaves no focused question, Pi offers one optional evidence checkpoint for further agreements, correspondence, policies, notices, asset records, or supporting material.
+4. A user reply consisting only of a file path/upload is new evidence, not an implied answer. Pi rebuilds the packet with the original and every related document, then reassesses.
+5. `review normally` or `skip` closes the checkpoint. Pi completes any needed research and finalises the report without asking another evidence question, expressly identifying unresolved gaps or assumptions.
+
+This preserves normal conversation: Pi may choose whether research, a question, a review, a draft, or a preview is justified by the request; it is not forced into a review sequence.
+
+## Documents, artifacts and previews
+
+### Input and hand-off
+
+- Supported inbound file types are PDF, DOCX, DOC, ODT, PPTX, XLSX, TXT, Markdown, JSON, PNG, JPG and JPEG; normal size limit is 50 MB.
+- Related agreements and annexures are extracted into one labeled review packet, with an optional designated primary document.
+- LibreChat provider uploads and Upload-as-Text envelopes are normalized to local private files before Pi sees them.
+- HTTP attachment retrieval is limited to configured origins and refuses redirects.
+- Tool outputs are downloaded/localized beneath junior-silva/artifacts/operation-id locally or /data/artifacts/operation-id in Docker.
+
+### Preview formats
+
+librechat_prepare_document_preview supports DOCX, PDF, PPTX, XLSX, Markdown, TXT and JSON.
+
+- **Reviewed DOCX:** converts document content to sanitized HTML and reads Word comments so a dashboard and each reviewer note appear beside its matching clause. The original Word comments/highlights remain unchanged in the downloadable DOCX.
+- **Other DOCX/PDF:** readable derived document/text previews; native files remain authoritative.
+- **PPTX:** a gallery of extracted slide text, up to 25 slides; native PowerPoint remains the editable/presentation-quality version.
+- **XLSX:** up to four sheets, 30 rows and 12 columns each; native workbook remains authoritative for formulas, formatting and complete data.
+- **Markdown/text/JSON:** native LibreChat Markdown/text Artifact preview.
+
+## Skills, code execution and security boundary
+
+The copied .agents/skills are deliberately available to Pi. Current CLI and hosted bridge launches **do not pass the no-builtin-tools flag**. This allows Pi to read skill instructions and run their scripts/code for legal work products such as presentations, spreadsheets, PDFs and documents.
+
+That is functional but it is a material deployment boundary: the legal-scope extension is an agent-policy guardrail, not a security sandbox. A production deployment that accepts untrusted public users should isolate the Pi process, writable workspace and egress at the container/host level, and should not rely solely on prompts to protect the repository or secrets. The MCP code_runner_data_transform tool is separately constrained and is not equivalent to Pi’s built-in execution capabilities.
+
+## Configuration and data paths
+
+.env is loaded by core/environment.mjs and must never be committed. .env.example is the authoritative safe list of expected variables.
+
+| Group | Examples | Purpose |
+| --- | --- | --- |
+| Pi model | PI_PROVIDER, PI_MODEL, provider API key | Pi’s reasoning model. |
+| legal services | RAG_*, TRANSLATOR_* | Active external legal-research and translation endpoints. Legacy Reviewer/Drafter variables may remain during migration but are not used by the production MCP server. |
+| private precedents | JUNIOR_SILVA_KB_ROOT, JUNIOR_SILVA_KB_HOST_PATH | Optional host-mounted, read-only Drafter precedent corpus; never copied into the image or repository. |
+| public web | WEB_SEARCH_*, optional scraper/reranker settings | Current public-source research. The current adapter calls Serper; scraper/reranker values are reserved configuration until an adapter uses them. |
+| endpoint | JUNIOR_SILVA_API_KEY, PUBLIC_URL, MODEL_NAME, PORT | OpenAI-compatible endpoint and artifact URLs. |
+| storage | DATA_ROOT, ARTIFACT_ROOT, UPLOAD_ROOT, WORKSPACE_ROOT | Runtime data isolation. |
+
+Default local data paths use junior-silva under the repository. Docker mounts them under /data and mounts the externally shared artifacts, uploads, workspace, sessions, and pi-agent folders for inspection/persistence.
+
+For an interactive Windows CLI, set `JUNIOR_SILVA_KB_ROOT` to the local `clean-kb` directory. For Docker, set `JUNIOR_SILVA_KB_HOST_PATH` to that host directory; Compose mounts it read-only at `/kb` and sets the container root accordingly. An empty read-only mount is used when no corpus is configured, so the service starts but precedent search reports that it has no matching material.
+
+The Windows launcher creates and exports `JUNIOR_SILVA_WORKSPACE_ROOT` before Pi starts. If Pandoc is unavailable in the Windows/Git-Bash environment, the legal-DOCX skill directs Pi to its WSL-backed portable renderer rather than abandoning the requested DOCX. The portable renderer preserves authored numbering, headings and bullets; Docker retains the full Pandoc pipeline.
+
+## Running and deployment
+
+### Windows interactive Pi
+
+~~~powershell
 cd 'D:\Intern\Work\Junior Silva V2\pi'
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\Start-JuniorSilvaV2.ps1
-```
+~~~
 
-The launcher keeps Pi's regular CLI/TUI. On the first run, approve the trusted project MCP registration. This interactive CLI retains Pi's normal built-in capabilities and the copied skills in addition to the seven legal MCP tools.
+On first use, approve the project MCP server. The interactive client uses the same extensions and native legal MCP service as the hosted endpoint.
 
-## Running the Dockerized OpenAI-compatible endpoint
+### Docker HTTP endpoint
 
-Docker runs inside WSL:
-
-```bash
+~~~bash
 cd '/mnt/d/Intern/Work/Junior Silva V2/pi'
 docker compose build junior-silva-v2
-docker compose up -d junior-silva-v2
+docker compose up -d --force-recreate junior-silva-v2
+docker compose ps junior-silva-v2
 curl http://127.0.0.1:8132/health
-```
+~~~
 
-The local endpoint is `http://127.0.0.1:8132/v1`, the model name is `junior-silva-v2`, and authentication uses `JUNIOR_SILVA_API_KEY`. Host port 8132 is intentional because the local Reviewer V2 container already occupies 8126. Inside Docker, Junior Silva still listens on 8126.
+The container listens on 8126; Compose publishes it as 127.0.0.1:8132. The optional interactive container is started with:
 
-The hosted endpoint exposes only the legal MCP tools (`--no-builtin-tools`). This prevents LibreChat users from obtaining a shell or file editor. The interactive Windows/Docker CLI remains full Pi.
-
-To use the full CLI inside Docker:
-
-```bash
+~~~bash
 docker compose --profile cli run --rm junior-silva-cli
-```
+~~~
 
-## LibreChat endpoint shape
+Compose connects to librechat_default and rag-chat-server_default external Docker networks by default. The active external service hostnames are RAG Chat Server and Translator; legacy Reviewer/Drafter endpoint configuration can be removed after operational migration.
 
-Configure a normal OpenAI-compatible custom endpoint with:
+### LibreChat
 
-- base URL: `http://junior-silva-v2:8126/v1` when LibreChat shares `librechat_default`
-- API key: the same value as `JUNIOR_SILVA_API_KEY`
-- fixed model: `junior-silva-v2`
-- model fetching: disabled or enabled through `/v1/models`
+Add a normal OpenAI-compatible custom endpoint. In a shared Docker network use:
 
-For browser-downloadable artifacts in a deployed environment, set `JUNIOR_SILVA_PUBLIC_URL` to the externally reachable reverse-proxy path rather than the internal Docker hostname.
+- base URL: http://junior-silva-v2:8126/v1
+- model identifier: value of JUNIOR_SILVA_MODEL_NAME, normally junior-silva-v2
+- API key: JUNIOR_SILVA_API_KEY
 
-## Verified behavior
+Set JUNIOR_SILVA_PUBLIC_URL to the public reverse-proxy route, not an internal hostname, so browser artifact downloads work. The OpenAI bridge sends specialist progress as reasoning_content; LibreChat can display it as visible status/thought content.
 
-- Pi reports version `1.0.0`; all eight MCP tools connect.
-- A three-document agreement/annexure review was sent as one combined packet. Pi asked Reviewer Perera's real questions and did not auto-answer them.
-- A later real user answer completed the same review, retained the Background-IP concern, produced clause 6.1 findings, and returned a valid annotated DOCX.
-- LibreChat-style Upload as Text was reconstructed, reviewed interactively, and completed only after the user's second-turn answers.
-- Protected Reviewer and Drafter DOCX/Markdown downloads returned HTTP 200 with correct MIME types and valid content.
-- Dockerized Pi independently selected RAG for a legal question and preserved linked Lex/NLR/SLLR authorities and answer sections.
-- Dockerized Pi independently selected Translator Siriwardena and returned Sinhala text.
-- DOCX, reviewed DOCX, PDF, and Markdown previews were generated locally into safe LibreChat Artifact markup; reviewed-DOCX previews retain a dashboard and reviewer comments beside the matched clauses while leaving the original DOCX unchanged.
-- The image builds, the container is healthy on port 8132, and the Docker CLI reports Pi `1.0.0`.
+## Tests and operational checks
 
-## Original approved implementation plan
+TESTING.md is the product acceptance checklist. It requires focused tests for a changed feature before the full regression suite.
 
-The following is the original plan retained for traceability.
+Useful focused commands:
 
-I have inspected the fresh Pi checkout, V1 integrations, and LibreChat skills. No files have been changed.
+~~~powershell
+node --test junior-silva/test/files.test.mjs junior-silva/test/legal-research.test.mjs junior-silva/test/time.test.mjs junior-silva/test/native-review.test.mjs junior-silva/test/mcp-native-tools.test.mjs
+node --check junior-silva/mcp/server.mjs
+node --check junior-silva/server/openai.mjs
+git diff --check
+~~~
 
-# Proposed architecture
+The upstream repository-wide npm run check may currently fail in packages/ai/test/together-models.test.ts because DeepSeek-V4-Pro is absent from the generated Together model union. That is an upstream Pi baseline issue, not a Junior Silva V2 source error. Do not edit the unrelated test merely to make a V2 commit pass.
 
-Pi will use its native MCP support:
+## Known limitations and next engineering work
 
-```text
-User request
-    ↓
-Pi model
-    ↓ chooses tools from their descriptions
-Built-in Pi MCP client
-    ↓ stdio
-Junior Silva Legal Services MCP server
-    ├── Reviewer Perera V2
-    ├── Drafter Weeramantry
-    ├── Translator Siriwardena
-    └── RAG Chat Server
-```
-
-There will be no central workflow engine, routing prompt, matter manager, or prescribed review→research→draft sequence.
-
-Pi will see the available capabilities and decide which tools to call, in which order, based on the conversation.
-
-## 1. MCP server
-
-Add one local, standards-compliant stdio MCP server inside the fresh Pi repository.
-
-Proposed structure:
-
-```text
-D:\Intern\Work\Junior Silva V2\pi\
-├── .agents\
-│   └── skills\
-├── .pi\
-│   └── mcp.json
-├── junior-silva\
-│   ├── mcp\
-│   │   └── server.ts
-│   ├── services\
-│   │   ├── reviewer-perera.ts
-│   │   ├── drafter-weeramantry.ts
-│   │   ├── translator-siriwardena.ts
-│   │   └── rag-chat.ts
-│   ├── core\
-│   │   ├── environment.ts
-│   │   ├── files.ts
-│   │   ├── http.ts
-│   │   └── errors.ts
-│   └── tests\
-├── .env
-└── .env.example
-```
-
-`.pi/mcp.json` will register this as a project MCP server with `direct` exposure. The tool set is small, so Pi can see the complete tool descriptions without using tool search or codemode discovery.
-
-Only Pi’s built-in MCP extension will be needed. I will not add a custom routing extension.
-
-## 2. MCP tools
-
-### Reviewer Perera
-
-Reviewer is interactive, so its API needs separate tools rather than pretending one call can pause for user answers:
-
-- `reviewer_perera_start_review`
-  - Accepts a PDF/DOCX path, protected party, and any context already supplied by the user.
-  - Starts the review.
-  - Returns the reviewer’s actual questions or a completed review.
-
-- `reviewer_perera_continue_review`
-  - Accepts the returned review/conversation ID and the user’s answers.
-  - Continues until more questions or completion.
-  - Downloads the completed annotated DOCX locally.
-
-- `reviewer_perera_get_findings`
-  - Retrieves the structured clause-level findings for a completed review.
-
-These descriptions will explain capabilities, inputs, and outputs, but will not instruct Pi to run research or drafting afterward.
-
-### RAG Chat Server
-
-- `rag_chat_research`
-  - Answers Sri Lankan legal questions using the RAG service.
-  - Preserves citations and hyperlinks returned by RAG.
-  - Can accept optional review findings or supplied legal context.
-  - Does not automatically invoke review or drafting.
-
-This will cover both ordinary legal questions and follow-up questions about reviewed clauses without imposing a fixed workflow.
-
-### Drafter Weeramantry
-
-- `drafter_weeramantry_draft_or_revise`
-  - Creates a new legal document or revises an existing one.
-  - Accepts instructions and optional source documents, findings, or research.
-  - Downloads returned DOCX/Markdown outputs into the local V2 artifacts directory.
-  - Its description will clearly distinguish drafting, revision, and preserving unaffected provisions.
-
-### Translator Siriwardena
-
-- `translator_siriwardena_translate_document`
-  - Translates a PDF, DOC, DOCX, image, or a previously produced local artifact.
-  - Downloads all document outputs locally.
-
-- `translator_siriwardena_translate_text`
-  - Translates pasted text directly.
-  - Returns text rather than manufacturing a document unnecessarily.
-
-## 3. File passing
-
-There will be no V1-style matter store or workflow-managed artifact graph.
-
-Instead:
-
-1. Each tool accepts normal local file paths.
-2. Service-generated URLs are downloaded automatically.
-3. Outputs are stored under:
-
-```text
-junior-silva\artifacts\<operation-id>\
-```
-
-4. Every tool returns structured results containing the local paths.
-5. Pi can pass those returned paths into another tool when the user requests a subsequent operation.
-
-Example:
-
-```text
-User asks for a draft
-→ Pi calls Drafter
-→ MCP downloads draft.docx
-→ tool returns its local path
-
-User then asks to translate it
-→ Pi calls Translator with that path
-```
-
-The MCP server will validate extensions, file existence, output origins, download sizes, timeouts, and filenames.
-
-## 4. Tool-selection behaviour
-
-There will be no routing rules such as “always review before drafting.”
-
-Expected autonomous behaviour:
-
-- “What is the effect of a binna marriage on inheritance?”
-  - Pi chooses RAG.
-
-- “Review this agreement for the Developer.”
-  - Pi chooses Reviewer and relays its questions.
-
-- “Draft a lease agreement.”
-  - Pi chooses Drafter.
-
-- “Translate this agreement into Sinhala.”
-  - Pi chooses Translator.
-
-- “Review this, then prepare a revised version.”
-  - Pi can choose Reviewer followed by Drafter because the user requested both.
-
-- “Draft an agreement.”
-  - Pi does not call RAG or Reviewer unless it independently determines one is necessary or the user asks for them.
-
-The only routing information Pi receives will be the MCP server description, individual tool descriptions, schemas, and returned data.
-
-## 5. LibreChat skills
-
-Copy the complete skill directories—not only their `SKILL.md` files—into `.agents/skills`:
-
-- `docx`
-- `pdf`
-- `pptx`
-- `xlsx`
-- `legal-docx-build`
-- `writing-style`
-- `doc-coauthoring`
-
-Scripts, templates, OOXML schemas, reference documents, Lua filters, and licence files will be preserved.
-
-Two safeguards:
-
-- `doc-coauthoring` contains an explicit staged workflow, so I will keep it manual-only rather than letting it silently impose that workflow on ordinary requests.
-- `writing-style` will remain an auxiliary skill rather than appearing as a user-facing action.
-
-No central “Junior Silva workflow” skill will be created.
-
-I will also audit Windows compatibility because some LibreChat skills assume a Linux sandbox or `/mnt/data`. Only environment/path compatibility will be adapted; their document-quality instructions will remain intact.
-
-## 6. Environment and secrets
-
-Create:
-
-- `.env` — real local configuration, ignored by Git.
-- `.env.example` — names and safe defaults only.
-
-I will copy the secrets required for this V2 runtime directly from V1 without printing them:
-
-- Current Pi provider/model configuration and its API key.
-- Reviewer URL and integration token.
-- RAG URL and API key.
-- Drafter URL, API key, and timeout settings.
-- Translator URL and API key.
-
-I will not copy unrelated V1 secrets such as the old Bandara HTTP gateway token, Typesense credentials, web-search keys, document-worker token, or LibreChat-facing settings because this V2 design does not use them.
-
-For Windows-to-WSL connectivity, service URLs will come from `.env`. The infrastructure layer will resolve published localhost ports and can fall back to the current WSL address when necessary. Pi itself will not need instructions about WSL or Docker.
-
-## 7. Security boundaries
-
-The MCP layer will include:
-
-- Input-path allowlisting.
-- Supported-extension and size validation.
-- Download-origin allowlisting per service.
-- Safe generated filenames.
-- Request timeouts and cancellation.
-- No API keys in tool results, errors, logs, or MCP configuration.
-- Redacted HTTP diagnostics.
-- Read-only/idempotent MCP annotations where applicable.
-- `.env`, downloaded artifacts, state, and traces excluded through `.gitignore`.
-
-## 8. Testing
-
-### Protocol tests
-
-- MCP initialization succeeds.
-- `pi mcp list` shows the server connected.
-- Every tool has the intended name, description, schema, and annotations.
-- No credential appears in MCP metadata or errors.
-
-### Individual service tests
-
-- Reviewer: start, answer questions, obtain annotated DOCX, retrieve findings.
-- RAG: answer a Sri Lankan legal question with working citation links.
-- Drafter: produce a DOCX and Markdown draft and save both locally.
-- Translator: translate direct text and a saved document.
-- Confirm all downloaded artifacts open correctly.
-
-### Autonomous Pi tests
-
-Run Pi without any workflow prompt and verify tool traces for:
-
-1. Legal research only.
-2. Document review only.
-3. Drafting only.
-4. Translation only.
-5. Draft → review.
-6. Review → legal follow-up question.
-7. Draft → translation.
-8. Review → draft revision → translation.
-9. An unrelated/general request where no legal service tool should be called.
-
-### Skill tests
-
-Validate Pi discovers each copied skill and test representative DOCX, PDF, PPTX, XLSX, and legal-DOCX output.
-
-### Repository checks
-
-After implementation:
-
-- Run the Pi repository’s required `npm run check`.
-- Run focused MCP and adapter tests.
-- Inspect Git status for accidental artifacts or secrets.
-- Verify no V1 routing fragments or workflow prompts were copied.
-
-This gives V2 a deliberately thin architecture: native Pi reasoning, one neutral MCP capability layer, four external legal services, and artifact skills. No hard-coded orchestration is carried over from V1.
+- PPTX and XLSX previews are content inspections, not pixel-perfect native rendering.
+- PDF preview is extracted text, not a page-image rendering.
+- Preview parsing has byte/XML limits and sanitization, but OOXML preview code should receive ongoing adversarial/zip-bomb testing.
+- Public web research currently searches Serper results; Firecrawl and Jina configuration exists but is not yet invoked by services/web.mjs.
+- RAG is the current domestic research authority service in this branch. Direct Typesense research experiments are not part of this V2 deployment branch.
+- Native DOCX review rendering currently relies on the available DOCX/legal-DOCX skills after findings are source-validated. A deterministic comment/highlight renderer is a valuable next hardening step.
+- A formal authority/citation and quotation verification layer, data-retention/expiry policy, tenant-aware audit access, and legal-answer evaluation corpus remain valuable future work.

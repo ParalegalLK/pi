@@ -26,20 +26,10 @@ function isClearlyNonLegal(text: string) {
 	return /\b(?:html|css|javascript|typescript|python|react|website|web\s*app|mobile\s*app|software|algorithm|debug|program(?:ming)?|code|t-?shirt|poem|song|recipe|game|fiction|travel itinerary)\b/i.test(text) && !isClearlyLegal(text);
 }
 
-/**
- * Drafter is a legal-instrument service, not a general document-production
- * engine. Smaller models occasionally ignore a negative sentence in an MCP
- * description, so keep this narrow compatibility check at the tool boundary.
- * A blocked call returns the reason to the model, which can then use the
- * already-discovered PPTX/XLSX/PDF skill and its built-in execution tools.
- */
-function isDrafterVisualArtifactCall(toolName: string, input: Record<string, unknown>) {
-	if (!toolName.includes("drafter_weeramantry_draft_or_revise")) return false;
-	const instruction = typeof input.instruction === "string" ? input.instruction : "";
-	return /\b(?:power\s*point|powerpoint|pptx|slides?|presentation|spreadsheet|xlsx|csv|chart|dashboard|infographic)\b/i.test(instruction);
-}
-
 export default function juniorSilvaLegalContext(pi: ExtensionAPI) {
+	pi.on("before_agent_start", (event) => ({
+		systemPrompt: `${event.systemPrompt}\n\n## Native legal review and drafting\nFor a document-review request, read the sri-lankan-legal-review skill and call review_prepare_document_set with every related primary and supporting file. It prepares evidence; it never asks questions itself. Read its packet before deciding whether a focused factual question is genuinely necessary. Never silently assume a material fact that the document relies on. For a substantive pleading, agreement, or filing-ready document, if no focused question remains, offer one optional evidence checkpoint before finalisation: ask whether the user has further agreements, correspondence, policies, notices, asset records, or evidence to consider; they may upload it, answer, say “review normally”, or say “skip”. Do not add this checkpoint if the user explicitly asks for immediate or chat-only review. If the user responds with a document path/upload rather than prose, treat it as newly supplied evidence: rerun review_prepare_document_set with the original primary file plus every related document and reassess before finalising. A response of “review normally” or “skip” closes every clarification/evidence checkpoint for this review: complete needed research and finalise without asking another evidence question, while expressly recording unresolved evidence gaps or assumptions. Once you have source-grounded findings, call review_finalize_document. Unless the user explicitly requested chat-only analysis, do not say the review is complete until review_finalize_document returns both Reviewed_document.docx and legal-review.md. Never delegate the review to Reviewer Perera.\n\nFor a substantial legal instrument, revision, pleading, affidavit, legal opinion, notice, or formal document, read the sri-lankan-legal-drafting skill. Use private precedent tools only for structure, Sri Lankan RAG for legal authority, and native draft validation before delivery. Do not delegate drafting to Drafter Weeramantry.`,
+	}));
 	pi.on("input", (event) => {
 		if (event.source === "extension") return { action: "continue" };
 		if (isGreeting(event.text)) {
@@ -60,14 +50,5 @@ export default function juniorSilvaLegalContext(pi: ExtensionAPI) {
 	pi.on("before_agent_start", (event) => ({
 		systemPrompt: `${event.systemPrompt}\n\n## LibreChat artifact delivery\nFor every completed, user-facing file—whether produced by a document skill or received from Reviewer Perera, Drafter Weeramantry, or Translator Siriwardena—first preserve the original file and its download link. In LibreChat, normally call librechat_prepare_document_preview once for the primary final DOCX, PDF, PPTX, XLSX, Markdown, text, or JSON deliverable before your final answer, so the user can inspect it in the side panel. Do not preview intermediate files, duplicate source formats, ordinary short chat-only emails, or an unchanged file that is already previewed in the current turn. A preview never replaces the original downloadable file.`,
 	}));
-
-	pi.on("tool_call", (event) => {
-		if (!isDrafterVisualArtifactCall(event.toolName, event.input)) return;
-		return {
-			block: true,
-			reason:
-				"Drafter Weeramantry accepts formal legal instruments only; it cannot create presentations, PowerPoint/PPTX files, slides, spreadsheets, XLSX files, charts, dashboards, or infographics. Read and follow the matching discovered skill instead, create the artifact in the Junior Silva workspace, then call workbench_publish_artifact.",
-		};
-	});
 
 }
