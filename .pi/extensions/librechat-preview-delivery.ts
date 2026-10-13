@@ -10,7 +10,15 @@ function previewResult(event: ToolResultEvent): string | undefined {
 }
 
 function isPreviewTool(name: string) {
-	return name === "librechat_prepare_document_preview" || name.endsWith("/librechat_prepare_document_preview");
+	return ["librechat_prepare_document_preview", "workbench_publish_artifact", "review_finalize_document"]
+		.some((tool) => name === tool || name.endsWith(`/${tool}`));
+}
+
+function removeUntrustedHtmlPreview(text: string) {
+	// Only renderer-produced :::artifact markup is allowed to create the browser
+	// preview. This strips a model-authored raw document that can otherwise look
+	// like a degraded side-panel preview.
+	return text.replace(/<!doctype\s+html[\s\S]*?<\/html>/gi, "").trim();
 }
 
 // Pi decides whether a preview is useful by deciding whether to call the MCP
@@ -27,7 +35,7 @@ export default function libreChatPreviewDelivery(pi: ExtensionAPI) {
 	});
 	pi.on("message_end", (event) => {
 		if (!pending || event.message.role !== "assistant") return;
-		const text = event.message.content.filter((part) => part.type === "text").map((part) => part.text || "").join("\n");
+		const text = removeUntrustedHtmlPreview(event.message.content.filter((part) => part.type === "text").map((part) => part.text || "").join("\n"));
 		if (text.includes(pending)) return;
 		return { message: { ...event.message, content: [{ type: "text", text: `${text.trim()}\n\n${pending}`.trim() }] } };
 	});

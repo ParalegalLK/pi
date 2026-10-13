@@ -4,6 +4,7 @@ import path from "node:path";
 import { buildReviewPacket, extractDocumentText } from "./document-text.mjs";
 import { inputFile, operationDirectory, saveJson, describeArtifact } from "./files.mjs";
 import { renderReviewDocx } from "./review-render.mjs";
+import { preparePreview } from "./previews.mjs";
 
 const DIMENSIONS = [
 	["rights, duties and performance", ["shall", "must", "obligation", "performance", "deliver", "service level"]],
@@ -39,6 +40,12 @@ function hasSourceAnchor(source, anchor) {
 function clauseNumber(line) {
 	const match = /^\s*((?:\d+)(?:\.\d+){0,5}[.)]?)\s+/.exec(line);
 	return match?.[1]?.replace(/[.)]$/, "") || "";
+}
+
+function requiresEvidenceCheckpoint(userContext) {
+	// An explicit immediate/chat-only request intentionally opts out. All other
+	// substantive native reviews receive one user-controlled evidence checkpoint.
+	return !/\b(?:immediate(?:ly)?|chat[ -]?only|without (?:questions|follow-?up)|no follow-?up)\b/i.test(String(userContext || ""));
 }
 
 export function clauseInventory(text) {
@@ -138,6 +145,7 @@ export async function prepareReviewDocumentSet(args, { onProgress = () => {} } =
 	const operation = await operationDirectory("review-preparation");
 	const sourceTextFile = path.join(operation.directory, "primary-source.txt");
 	await writeFile(sourceTextFile, source, "utf8");
+	const checkpointRequired = requiresEvidenceCheckpoint(args.user_context);
 	const contextFile = await saveJson(operation.directory, "review-context.json", {
 		created_at: new Date().toISOString(),
 		primary_file: primary.path,
@@ -149,6 +157,13 @@ export async function prepareReviewDocumentSet(args, { onProgress = () => {} } =
 		clauses,
 		commercial_coverage: dimensions,
 		user_context: String(args.user_context || "").trim(),
+		checkpoint: {
+			required: checkpointRequired,
+			status: checkpointRequired ? "pending" : "not_required",
+			message: checkpointRequired
+				? "Before an annotated review is finalised, give the user one opportunity to provide further relevant evidence or expressly proceed without it."
+				: "The user expressly requested an immediate/chat-only review, so no evidence checkpoint is required.",
+		},
 	});
 	return {
 		operation_id: operation.id,
@@ -159,7 +174,35 @@ export async function prepareReviewDocumentSet(args, { onProgress = () => {} } =
 		document_ledger: documentSet.ledger_file,
 		clause_inventory: clauses,
 		commercial_coverage: dimensions,
-		instruction: "This preparation contains all supplied evidence, source anchors, and coverage prompts. Review the packet before deciding whether a short factual question is necessary. Do not invent an answer to any question; the user may answer, say 'review normally', or supply another document. When findings are ready, call review_finalize_document to validate and create the reviewed DOCX and Markdown report.",
+		checkpoint: { required: checkpointRequired, status: checkpointRequired ? "pending" : "not_required" },
+		instruction: checkpointRequired
+			? "This preparation contains all supplied evidence, source anchors, and coverage prompts. Review the packet before deciding whether a short factual question is necessary. Do not invent an answer to any question. Before calling review_finalize_document, ask the user once whether they want to provide more relevant evidence; they may upload it, answer, say 'review normally', or say 'skip'. After an actual user response, call review_record_checkpoint_outcome. Do not record an outcome yourself in the same turn."
+			: "This preparation contains all supplied evidence, source anchors, and coverage prompts. The user expressly requested immediate/chat-only review, so complete the source-grounded review without an evidence checkpoint.",
+	};
+}
+
+/** Record the user's actual decision at a review evidence checkpoint. */
+export async function recordReviewCheckpointOutcome(args, { onProgress = () => {} } = {}) {
+	if (!args.review_context_file) throw new Error("review_context_file is required.");
+	const allowed = new Set(["review_normally", "skip", "answered"]);
+	const outcome = String(args.outcome || "");
+	if (!allowed.has(outcome)) throw new Error("outcome must be review_normally, skip, or answered.");
+	onProgress("Recording the user’s review-evidence decision…");
+	const context = JSON.parse(await readFile(args.review_context_file, "utf8"));
+	context.checkpoint = {
+		required: true,
+		status: "completed",
+		outcome,
+		user_response: String(args.user_response || "").trim().slice(0, 4000),
+		completed_at: new Date().toISOString(),
+	};
+	await writeFile(args.review_context_file, `${JSON.stringify(context, null, 2)}\n`, "utf8");
+	return {
+		review_context_file: args.review_context_file,
+		checkpoint: context.checkpoint,
+		instruction: outcome === "answered"
+			? "Use the user's answer and any supplied supporting document. If new documents were supplied, prepare a fresh combined document set before finalising."
+			: "The user chose to proceed without further evidence. Complete needed research and finalise the source-grounded review.",
 	};
 }
 
@@ -223,6 +266,14 @@ export async function finalizeReviewDocument(args, { onProgress = () => {} } = {
 	if (!args.review_context_file) throw new Error("review_context_file is required; first use review_prepare_document_set.");
 	if (!Array.isArray(args.findings) || !args.findings.length) throw new Error("findings must be a non-empty array.");
 	const context = JSON.parse(await readFile(args.review_context_file, "utf8"));
+	if (context.checkpoint?.required && context.checkpoint.status !== "completed") {
+		return {
+			completion: "review-awaiting-evidence-checkpoint",
+			review_context_file: args.review_context_file,
+			checkpoint: context.checkpoint,
+			instruction: "Do not finalise yet. Ask the user whether they have further relevant agreements, correspondence, notices, policies, records, or evidence to provide. They may upload it, answer a focused question, say 'review normally', or say 'skip'. Wait for the actual user response, then call review_record_checkpoint_outcome before retrying finalisation.",
+		};
+	}
 	const source = await readFile(context.source_text_file, "utf8");
 	const inventory = Array.isArray(context.clauses) ? context.clauses : clauseInventory(source);
 	onProgress("Validating proposed findings against the exact primary-document wording…");
@@ -244,7 +295,12 @@ export async function finalizeReviewDocument(args, { onProgress = () => {} } = {
 	await writeFile(reportFile, markdownReview(title, perspective, accepted), "utf8");
 	const docxFile = path.join(operation.directory, "Reviewed_document.docx");
 	onProgress("Creating the source-anchored reviewed DOCX and clause-by-clause report…");
-	await renderReviewDocx({ sourceFile: context.primary_file, sourceTextFile: context.source_text_file, findingsFile, outputFile: docxFile, title, perspective });
+	const render = await renderReviewDocx({ sourceFile: context.primary_file, sourceTextFile: context.source_text_file, findingsFile, outputFile: docxFile, title, perspective });
+	const annotation = JSON.parse(render.stdout || "{}");
+	if (annotation.annotated_count !== accepted.length) {
+		throw new Error(`Reviewed DOCX annotation coverage is incomplete (${annotation.annotated_count || 0}/${accepted.length}). Refine anchor_text to match the original Word clauses before finalising.`);
+	}
+	const preview = await preparePreview(docxFile, "Reviewed document");
 	return {
 		operation_id: operation.id,
 		completion: "review-artifacts-ready",
@@ -253,7 +309,9 @@ export async function finalizeReviewDocument(args, { onProgress = () => {} } = {
 		findings_file: findingsFile,
 		review_markdown: describeArtifact(reportFile, operation.id),
 		reviewed_docx: describeArtifact(docxFile, operation.id),
-		instruction: "The review deliverables are complete. Give the user the Reviewed_document.docx and legal-review.md artifacts. Do not claim rejected findings as source-grounded. If additional evidence arrives, run review_prepare_document_set again with the entire document set before finalising a revised review.",
+		annotation_coverage: annotation,
+		artifact_markup: preview.markup,
+		instruction: "The review deliverables are complete. Give the user the Reviewed_document.docx and legal-review.md artifacts. The reviewed DOCX annotation coverage has been verified. Do not claim rejected findings as source-grounded. If additional evidence arrives, run review_prepare_document_set again with the entire document set before finalising a revised review.",
 	};
 }
 

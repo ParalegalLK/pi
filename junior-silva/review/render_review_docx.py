@@ -106,6 +106,29 @@ def annotate_paragraph(paragraph, finding):
     return True
 
 
+def document_paragraphs(document):
+    """Yield body, table-cell, header and footer paragraphs exactly once."""
+    seen = set()
+    def emit(paragraphs):
+        for paragraph in paragraphs:
+            marker = id(paragraph._p)
+            if marker not in seen:
+                seen.add(marker)
+                yield paragraph
+    yield from emit(document.paragraphs)
+    for table in document.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                yield from emit(cell.paragraphs)
+                for nested in cell.tables:
+                    for nested_row in nested.rows:
+                        for nested_cell in nested_row.cells:
+                            yield from emit(nested_cell.paragraphs)
+    for section in document.sections:
+        yield from emit(section.header.paragraphs)
+        yield from emit(section.footer.paragraphs)
+
+
 def borders(table):
     # python-docx/bayoo-docx exposes the existing tblPr node directly; unlike
     # paragraph properties it has no get_or_add_tblPr helper.
@@ -147,12 +170,22 @@ def add_cover(document, title, perspective, findings):
     page.add_run().add_break(WD_BREAK.PAGE)
 
 
-def add_report_body(document, findings, source_text):
-    if source_text:
-        heading = document.add_heading("Reviewed source text", level=1)
-        for line in source_text.splitlines():
-            if line.strip():
-                document.add_paragraph(line.strip())
+def add_extracted_source(document, source_text):
+    """Add extracted PDF/text source as annotatable Word paragraphs.
+
+    PDF and plain-text inputs cannot retain their original Word runs, but the
+    resulting review DOCX can still preserve the extracted source wording and
+    attach comments/highlights at the matching clauses.
+    """
+    if not source_text:
+        return
+    document.add_heading("Reviewed source text", level=1)
+    for line in source_text.splitlines():
+        if line.strip():
+            document.add_paragraph(line.strip())
+
+
+def add_findings_body(document, findings):
     document.add_page_break()
     document.add_heading("Clause-by-clause review findings", level=1)
     for index, finding in enumerate(findings, 1):
@@ -180,15 +213,26 @@ def main():
         raise SystemExit("Findings JSON must be an array.")
     source = Path(args.source) if args.source else None
     source_text = Path(args.source_text).read_text(encoding="utf-8") if args.source_text else ""
+    annotation_ledger = []
     if source and source.suffix.lower() == ".docx" and source.is_file():
         document = docx.Document(str(source))
-        for finding in findings:
-            for paragraph in document.paragraphs:
-                if annotate_paragraph(paragraph, finding):
-                    break
     else:
         document = docx.Document()
-        add_report_body(document, findings, source_text)
+        add_extracted_source(document, source_text)
+    for finding in findings:
+        annotated = False
+        for paragraph in document_paragraphs(document):
+            if annotate_paragraph(paragraph, finding):
+                annotated = True
+                break
+        annotation_ledger.append({
+            "id": finding.get("id"),
+            "clause_number": finding.get("clause_number", "N/A"),
+            "title": finding.get("title", "Contractual risk"),
+            "status": "annotated" if annotated else "unmatched",
+        })
+    if not (source and source.suffix.lower() == ".docx" and source.is_file()):
+        add_findings_body(document, findings)
     add_cover(document, args.title, args.perspective, findings)
     for section in document.sections:
         footer = section.footer.paragraphs[0]
@@ -197,7 +241,12 @@ def main():
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     document.save(output)
-    print(output)
+    print(json.dumps({
+        "output": str(output),
+        "total_findings": len(findings),
+        "annotated_count": sum(1 for item in annotation_ledger if item["status"] == "annotated"),
+        "annotation_ledger": annotation_ledger,
+    }))
 
 
 if __name__ == "__main__":

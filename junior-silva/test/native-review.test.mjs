@@ -9,6 +9,7 @@ import {
 	clauseInventory,
 	finalizeReviewDocument,
 	prepareReviewDocumentSet,
+	recordReviewCheckpointOutcome,
 	readDocumentSet,
 	renderReviewReport,
 	validateReviewFindings,
@@ -54,19 +55,33 @@ test("two-tool review preparation and finalisation create source-grounded review
 	const prepared = await prepareReviewDocumentSet({ file_paths: [fixture.primary, fixture.annexure], primary_file_path: fixture.primary, user_context: "Protect the Developer." });
 	assert.equal(prepared.primary_file, path.resolve(fixture.primary));
 	assert.ok(prepared.clause_inventory.some((item) => item.clause_number === "6.1"));
-	const result = await finalizeReviewDocument({
+	const findings = [
+		{ clause_number: "6.1", anchor_text: "The Developer assigns all source code, tools and deliverables to the Client immediately.", category: "commercial", severity: "material commercial risk", title: "No background IP carve-out", explanation: "The wording captures existing tools.", recommendation: "Exclude background IP and license it only as needed.", authority_urls: ["https://lex.paralegal.lk/"] },
+		{ clause_number: "99", anchor_text: "This wording does not occur in the document.", category: "legal", title: "Unsupported" },
+	];
+	const waiting = await finalizeReviewDocument({
 		review_context_file: prepared.review_context_file,
 		perspective: "Developer",
-		findings: [
-			{ clause_number: "6.1", anchor_text: "The Developer assigns all source code, tools and deliverables to the Client immediately.", category: "commercial", severity: "material commercial risk", title: "No background IP carve-out", explanation: "The wording captures existing tools.", recommendation: "Exclude background IP and license it only as needed.", authority_urls: ["https://lex.paralegal.lk/"] },
-			{ clause_number: "99", anchor_text: "This wording does not occur in the document.", category: "legal", title: "Unsupported" },
-		],
+		findings,
 	});
+	assert.equal(waiting.completion, "review-awaiting-evidence-checkpoint");
+	const checkpoint = await recordReviewCheckpointOutcome({ review_context_file: prepared.review_context_file, outcome: "review_normally", user_response: "review normally" });
+	assert.equal(checkpoint.checkpoint.status, "completed");
+	const result = await finalizeReviewDocument({ review_context_file: prepared.review_context_file, perspective: "Developer", findings });
 	assert.equal(result.accepted.length, 1);
 	assert.equal(result.rejected.length, 1);
 	assert.match(await readFile(result.review_markdown.local_path, "utf8"), /No background IP carve-out/);
 	assert.match(await readFile(result.review_markdown.local_path, "utf8"), /https:\/\/lex\.paralegal\.lk/);
 	assert.ok((await readFile(result.reviewed_docx.local_path)).subarray(0, 2).equals(Buffer.from("PK")));
+	assert.ok(result.artifact_markup.startsWith(":::artifact{"));
+	assert.equal(result.annotation_coverage.annotated_count, 1);
+});
+
+test("immediate or chat-only review is the narrow evidence-checkpoint exception", async (t) => {
+	const fixture = await fixtureSet();
+	t.after(() => rm(fixture.directory, { recursive: true, force: true }));
+	const prepared = await prepareReviewDocumentSet({ file_path: fixture.primary, user_context: "Please provide an immediate chat-only review." });
+	assert.equal(prepared.checkpoint.status, "not_required");
 });
 
 test("native review coverage and draft validation expose evidence and unresolved placeholders", async (t) => {

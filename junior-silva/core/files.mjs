@@ -4,6 +4,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { artifactsRoot, env, workspaceRoot } from "./environment.mjs";
 import { download } from "./http.mjs";
+import { preparePreview } from "./previews.mjs";
 
 const MAX_INPUT_BYTES = 50 * 1024 * 1024;
 const INPUT_EXTENSIONS = new Set([".pdf", ".docx", ".doc", ".odt", ".pptx", ".xlsx", ".txt", ".md", ".json", ".png", ".jpg", ".jpeg"]);
@@ -65,7 +66,16 @@ export async function publishWorkspaceArtifact(filename, title) {
 	const name = safeFilename(title ? `${title}${extension}` : path.basename(source), `legal-artifact${extension}`);
 	const destination = path.join(operation.directory, name);
 	await copyFile(source, destination);
-	return { operation_id: operation.id, artifact: describeArtifact(destination, operation.id) };
+	// A published document is a completed user-facing deliverable.  Generate its
+	// preview here, rather than trusting the agent to invent HTML in its reply.
+	const preview = await preparePreview(destination, title);
+	return {
+		operation_id: operation.id,
+		artifact: describeArtifact(destination, operation.id),
+		preview_kind: preview.kind,
+		preview_title: preview.title,
+		artifact_markup: preview.markup,
+	};
 }
 export async function saveJson(directory, filename, value) {
 	const destination = path.join(directory, filename);
