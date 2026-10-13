@@ -3,10 +3,12 @@ import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { artifactsRoot, env, projectRoot, requiredEnv, uploadsRoot, workspaceRoot } from "../core/environment.mjs";
 import { mimeType, resolveArtifactRequest, safeFilename } from "../core/files.mjs";
+import { dispatchMcpRequest } from "../mcp/server.mjs";
 
 const PORT = Number(env("JUNIOR_SILVA_PORT", "8126"));
 const HOST = env("JUNIOR_SILVA_BIND_HOST", "127.0.0.1");
@@ -18,6 +20,7 @@ const SESSION_ROOT = path.join(path.dirname(artifactsRoot), "sessions");
 const AGENT_ROOT = path.resolve(env("PI_CODING_AGENT_DIR", path.join(path.dirname(artifactsRoot), "pi-agent")));
 const PI_CLI = path.join(projectRoot, "packages", "coding-agent", "dist", "bundle", "cli.js");
 const ATTACHMENT_ORIGINS = new Set(env("JUNIOR_SILVA_ATTACHMENT_ORIGINS").split(",").map((item) => item.trim()).filter(Boolean));
+const auditRoot = path.join(path.dirname(artifactsRoot), "audit");
 
 function json(res, status, value) {
 	const body = JSON.stringify(value);
@@ -157,8 +160,71 @@ function piPrompt(instruction, files) {
 	return `The user supplied these local document files with this request:\n${files.map((item) => `- ${item}`).join("\n")}\n\nUser request:\n${instruction || "Examine the supplied legal documents and respond appropriately."}`;
 }
 
-function progressName(toolName) {
-	return ({ legal_read_document_set: "Reading the primary document and supporting evidence…", legal_build_clause_inventory: "Mapping clauses and paragraphs…", legal_audit_commercial_coverage: "Checking commercial-risk coverage…", legal_validate_review_findings: "Validating review findings against the source…", legal_render_review_report: "Preparing validated native review findings…", legal_precedent_search: "Searching drafting precedents…", legal_precedent_read: "Reading a selected drafting precedent…", legal_validate_draft: "Checking the native legal draft…", rag_chat_research: "Researching Sri Lankan legal authorities and linked citations…", translator_siriwardena_translate_document: "Translator Siriwardena is translating the document…", translator_siriwardena_translate_text: "Translator Siriwardena is translating the supplied text…", workbench_publish_artifact: "Publishing the completed legal file for download…", librechat_prepare_document_preview: "Preparing a local document preview…" })[toolName] || `Using ${toolName || "a specialist tool"}…`;
+const safeToolProgress = Object.freeze({
+	review_prepare_document_set: "Reviewing the supplied legal document set…",
+	review_finalize_document: "Preparing the annotated legal review…",
+	legal_precedent_search: "Consulting drafting structure…",
+	legal_precedent_read: "Reviewing a drafting pattern…",
+	legal_validate_draft: "Checking the legal draft for completeness…",
+	rag_chat_research: "Researching Sri Lankan legal authorities and linked citations…",
+	legal_source_retrieve_details: "Retrieving an underlying Sri Lankan legal source…",
+	web_search_public_legal_sources: "Checking current public legal sources…",
+	translator_siriwardena_translate_document: "Translator Siriwardena is translating the document…",
+	translator_siriwardena_translate_text: "Translator Siriwardena is translating the supplied text…",
+	code_runner_data_transform: "Performing a legal calculation or structured analysis…",
+	workbench_publish_artifact: "Publishing the completed legal file for download…",
+	librechat_prepare_document_preview: "Preparing a local document preview…",
+});
+
+export function safeProgressName(toolName) {
+	const raw = String(toolName || "");
+	const normalized = Object.keys(safeToolProgress).find((name) => raw === name || raw.endsWith(`__${name}`)) || raw;
+	if (safeToolProgress[normalized]) return safeToolProgress[normalized];
+	if (/^(bash|shell|terminal|exec|run_command)$/i.test(normalized)) return "Preparing the requested legal work product…";
+	if (/^(read|read_file|list|find|glob|grep|search_files)$/i.test(normalized)) return "Reviewing supplied legal material…";
+	if (/^(write|edit|create_file|apply_patch)$/i.test(normalized)) return "Preparing the requested legal work product…";
+	if (/skill/i.test(normalized)) return "Applying a relevant legal work skill…";
+	return "Using a legal work tool…";
+}
+
+function safeAuditToolName(toolName) {
+	const raw = String(toolName || "unknown");
+	return Object.keys(safeToolProgress).find((name) => raw === name || raw.endsWith(`__${name}`)) ||
+		(/^(bash|shell|terminal|exec|run_command)$/i.test(raw) ? "builtin_command" :
+			/^(read|read_file|list|find|glob|grep|search_files)$/i.test(raw) ? "builtin_read" :
+			/^(write|edit|create_file|apply_patch)$/i.test(raw) ? "builtin_write" : "builtin_or_unrecognized");
+}
+
+function agentEnvironment() {
+	const output = {
+		PATH: process.env.PATH || "",
+		HOME: process.env.HOME || "",
+		LANG: process.env.LANG || "C.UTF-8",
+		TERM: process.env.TERM || "xterm-256color",
+		TZ: "Asia/Colombo",
+		PI_CODING_AGENT_SESSION_DIR: SESSION_ROOT,
+		PI_CODING_AGENT_DIR: AGENT_ROOT,
+		PI_SKIP_VERSION_CHECK: "1",
+		JUNIOR_SILVA_MCP_GATEWAY_URL: `http://127.0.0.1:${PORT}/internal/mcp`,
+		JUNIOR_SILVA_DATA_ROOT: path.dirname(artifactsRoot),
+		JUNIOR_SILVA_ARTIFACT_ROOT: artifactsRoot,
+		JUNIOR_SILVA_UPLOAD_ROOT: uploadsRoot,
+		JUNIOR_SILVA_WORKSPACE_ROOT: workspaceRoot,
+	};
+	const provider = env("PI_PROVIDER", "google");
+	if (provider === "anthropic" && process.env.ANTHROPIC_API_KEY) output.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+	if (provider === "google" && process.env.GEMINI_API_KEY) output.GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+	return output;
+}
+
+function loopback(req) {
+	return ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(String(req.socket.remoteAddress || ""));
+}
+
+async function audit(sessionId, event) {
+	await mkdir(auditRoot, { recursive: true });
+	const line = JSON.stringify({ at: new Date().toISOString(), sessionId, ...event });
+	await appendFile(path.join(auditRoot, `${sessionId}.jsonl`), `${line}\n`, "utf8");
 }
 
 async function runPi(prompt, sessionId, onProgress) {
@@ -179,7 +245,7 @@ async function runPi(prompt, sessionId, onProgress) {
 	args.push(prompt);
 	await mkdir(SESSION_ROOT, { recursive: true });
 	return new Promise((resolve, reject) => {
-		const child = spawn(process.execPath, args, { cwd: projectRoot, env: { ...process.env, PI_CODING_AGENT_SESSION_DIR: SESSION_ROOT, PI_SKIP_VERSION_CHECK: "1" }, stdio: ["ignore", "pipe", "pipe"] });
+		const child = spawn(process.execPath, args, { cwd: projectRoot, env: agentEnvironment(), stdio: ["ignore", "pipe", "pipe"] });
 		let buffer = "";
 		let stderr = "";
 		let finalText = "";
@@ -191,13 +257,19 @@ async function runPi(prompt, sessionId, onProgress) {
 				try {
 					const event = JSON.parse(line);
 					if (event.type === "message_end" && event.message?.role === "custom" && event.message?.customType === "junior-silva-scope" && typeof event.message?.content === "string") finalText = event.message.content;
-					if (event.type === "agent_start") onProgress("Pi is planning the requested work…");
-					if (event.type === "tool_execution_start") onProgress(progressName(event.toolName || event.tool_name));
-					if (event.type === "tool_execution_update") {
-						const message = event.partialResult?.details?.progress || event.partial_result?.details?.progress || event.partialResult?.content?.find?.((part) => part.type === "text")?.text;
-						if (typeof message === "string" && message.trim()) onProgress(message.trim().slice(0, 500));
+					if (event.type === "agent_start") onProgress("Pi is planning the requested legal work…");
+					if (event.type === "tool_execution_start") {
+						const tool = event.toolName || event.tool_name;
+						onProgress(safeProgressName(tool));
+						void audit(sessionId, { type: "tool", tool: safeAuditToolName(tool), status: "started" }).catch(() => {});
 					}
-					if (event.type === "tool_execution_end" && event.isError) onProgress("A specialist tool reported a problem; Pi is deciding the next safe step…");
+					// Never relay update payloads: built-in tools can include shell output,
+					// files, URLs, source text, credentials, or internal service responses.
+					if (event.type === "tool_execution_end") {
+						const tool = event.toolName || event.tool_name;
+						void audit(sessionId, { type: "tool", tool: safeAuditToolName(tool), status: event.isError ? "error" : "completed" }).catch(() => {});
+						if (event.isError) onProgress("A specialist tool reported a problem; Pi is deciding the next safe step…");
+					}
 					if (event.type === "message_end" && event.message?.role === "assistant") finalText = (event.message.content || []).filter((part) => part.type === "text").map((part) => part.text || "").join("\n");
 				} catch { }
 			}
@@ -248,14 +320,15 @@ async function serveArtifact(res, pathname) {
 	res.end(bytes);
 }
 
-await Promise.all([mkdir(artifactsRoot, { recursive: true }), mkdir(uploadsRoot, { recursive: true }), mkdir(workspaceRoot, { recursive: true }), mkdir(SESSION_ROOT, { recursive: true }), mkdir(AGENT_ROOT, { recursive: true })]);
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+await Promise.all([mkdir(artifactsRoot, { recursive: true }), mkdir(uploadsRoot, { recursive: true }), mkdir(workspaceRoot, { recursive: true }), mkdir(SESSION_ROOT, { recursive: true }), mkdir(AGENT_ROOT, { recursive: true }), mkdir(auditRoot, { recursive: true })]);
 // Hosted mode uses an administrator-owned global MCP registration. It does not
 // bypass Pi's project-trust prompt or approve arbitrary project-local code.
 await writeFile(path.join(AGENT_ROOT, "mcp.json"), `${JSON.stringify({
 	mcpServers: {
 		"junior-silva-legal": {
 			command: process.execPath,
-			args: [path.join(projectRoot, "junior-silva", "mcp", "server.mjs")],
+			args: [path.join(projectRoot, "junior-silva", "mcp", "launcher.mjs")],
 			cwd: projectRoot,
 			exposure: "direct",
 			timeout: 1200,
@@ -270,6 +343,13 @@ const server = createServer(async (req, res) => {
 		if (req.method === "GET" && url.pathname === "/health") return json(res, 200, { status: "ok", service: MODEL, pi: "1.0.0" });
 		if (req.method === "GET" && url.pathname === "/ready") return json(res, 200, { ready: existsSync(PI_CLI), mcp: existsSync(path.join(projectRoot, ".pi", "mcp.json")) });
 		if (req.method === "GET" && url.pathname.startsWith("/files/")) return serveArtifact(res, url.pathname);
+		if (req.method === "POST" && url.pathname === "/internal/mcp") {
+			if (!loopback(req)) return json(res, 403, { error: "Local gateway only" });
+			const message = await requestBody(req);
+			const response = await dispatchMcpRequest(message);
+			if (!response) return json(res, 202, {});
+			return json(res, 200, response);
+		}
 		if (url.pathname.startsWith("/v1/") && !authorized(req)) return json(res, 401, { error: { message: "Unauthorized", type: "authentication_error" } });
 		if (req.method === "GET" && url.pathname === "/v1/models") return json(res, 200, { object: "list", data: [{ id: MODEL, object: "model", created: 0, owned_by: "paralegal.lk" }] });
 		if (req.method === "POST" && url.pathname === "/v1/chat/completions") {
@@ -301,5 +381,6 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => console.log(`[junior-silva-v2] listening on ${HOST}:${PORT}`));
+}
 
 export { fileCandidates, messageText, splitTextEnvelope, textUploads };

@@ -87,6 +87,7 @@ pi/
 │   │   ├── native-review.mjs                source anchors, clause inventory, coverage audit, validated reports
 │   │   ├── precedents.mjs                   read-only private drafting-precedent retrieval and draft hygiene
 │   │   ├── previews.mjs                     safe DOCX/PDF/PPTX/XLSX/Markdown/text/JSON previews
+│   │   ├── typesense-legal-sources.mjs      bounded direct legal-source detail retrieval
 │   │   └── time.mjs                         Colombo temporal context for current-source research
 │   ├── mcp/
 │   │   └── server.mjs                       MCP protocol implementation and tool declarations
@@ -109,6 +110,7 @@ pi/
 │       ├── mcp-native-tools.test.mjs         native review/drafting MCP contract tests
 │       ├── native-review.test.mjs            document-set, anchors and review rendering tests
 │       ├── time.test.mjs                    Colombo temporal-context tests
+│       ├── typesense-legal-sources.test.mjs direct-source contract tests
 │       └── fixtures/                        non-sensitive test fixtures
 ├── .dockerignore                            keeps secrets/runtime data out of Docker context
 ├── .env                                     local/server secrets; ignored by Git
@@ -159,6 +161,7 @@ All tools are declared in junior-silva/mcp/server.mjs and exposed directly by .p
 | legal_precedent_search / legal_precedent_read | Read a bounded excerpt from a private, read-only drafting corpus. | Structure only, never legal authority or user-visible source material. |
 | legal_validate_draft | Finds unresolved placeholders and basic hygiene issues in a draft. | Legal propositions still require RAG validation. |
 | rag_chat_research | Queries Sri Lankan legal research with authority links. | direct_answer is for research as the final answer; supporting_work_product is for research underpinning an email, letter, complaint, etc. |
+| legal_source_retrieve_details | Finds or retrieves bounded source material behind an already-relevant authority: case decisions, case passages and books use scoped Typesense search; Acts/constitutional material use Lex’s structured API for the original Act or exact section. | Use after RAG only when deeper source detail is genuinely required. For legislation, retrieve by Act ID or Act ID plus `section_number`; it accepts only known sources/fields, never raw infrastructure controls, and does not invent amendment history. |
 | translator_siriwardena_translate_document | Translates a supported document. | Returns localized generated files where the service provides them. |
 | translator_siriwardena_translate_text | Translates supplied text. | Avoids unnecessary document drafting. |
 | web_search_public_legal_sources | Searches current public legal/news sources. | No client personal facts in query; use RAG too when current sources may change stable law. |
@@ -212,6 +215,7 @@ That is functional but it is a material deployment boundary: the legal-scope ext
 | --- | --- | --- |
 | Pi model | PI_PROVIDER, PI_MODEL, provider API key | Pi’s reasoning model. |
 | legal services | RAG_*, TRANSLATOR_* | Active external legal-research and translation endpoints. Legacy Reviewer/Drafter variables may remain during migration but are not used by the production MCP server. |
+| direct source detail | JUNIOR_TYPESENSE_*, JUNIOR_LEX_LEGISLATION_* | Optional bounded detail behind RAG-cited cases, passages and books (source-scoped Typesense) plus original Acts/constitutional material and exact sections (Lex API using an internal read-only `X-API-Key`). These values never reach Pi or the user. |
 | private precedents | JUNIOR_SILVA_KB_ROOT, JUNIOR_SILVA_KB_HOST_PATH | Optional host-mounted, read-only Drafter precedent corpus; never copied into the image or repository. |
 | public web | WEB_SEARCH_*, optional scraper/reranker settings | Current public-source research. The current adapter calls Serper; scraper/reranker values are reserved configuration until an adapter uses them. |
 | endpoint | JUNIOR_SILVA_API_KEY, PUBLIC_URL, MODEL_NAME, PORT | OpenAI-compatible endpoint and artifact URLs. |

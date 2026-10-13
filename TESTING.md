@@ -50,3 +50,11 @@ Before the broader suite, verify review interaction behavior for a substantive p
 - Start a review with the primary document only. After preparation, Pi must either ask focused material questions or offer the optional evidence checkpoint; it must not finalise by silently assuming missing operative facts.
 - Reply to that question/checkpoint using only a related document path/upload. Pi must treat it as new evidence, rerun `review_prepare_document_set` with the full document set, then reassess before finalising.
 - Start another review with the primary document and related evidence together. Pi should read both before asking questions. If it asks a remaining focused question and the user says `skip`, Pi may finalise but must identify the unresolved evidence gap.
+
+## Direct legal-source detail retrieval
+
+- First obtain a normal Sri Lankan legal answer through `rag_chat_research`; confirm RAG remains the primary synthesis and citation tool.
+- When more detail about a cited authority is necessary, use `legal_source_retrieve_details` to find a known case and then retrieve bounded `decision_text` with its original link.
+- Verify a case-chunk query returns a matching source passage and PDF link; verify book retrieval returns the book/chapter identifiers and reader context.
+- Verify legislation retrieval discovers an Act through Lex, retrieves its complete ordered original sections with the Act ID, and retrieves an exact provision using that Act ID plus `section_number`. Use the Twenty Second Amendment to the Constitution (four sections) and section 57 of the Consumer Affairs Authority Act as controlled checks. Preserve only links returned by Lex; never invent amendment history or URLs. If the configured legislation endpoint is unavailable, it must fail without exposing an API key or raw service diagnostics. Respect Lex's five reader-page loads per minute limit during live checks.
+- Confirm the final response retains relevant authority hyperlinks and does not expose Typesense hosts, keys, collection configuration, or internal field/control details to the user.

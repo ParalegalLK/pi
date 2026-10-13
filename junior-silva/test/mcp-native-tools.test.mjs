@@ -34,7 +34,7 @@ test("MCP exposes native legal review and drafting tools instead of external rev
 	});
 	const list = responses.find((item) => item.id === 2)?.result?.tools || [];
 	const names = new Set(list.map((tool) => tool.name));
-	for (const name of ["review_prepare_document_set", "review_finalize_document", "legal_precedent_search", "legal_precedent_read", "legal_validate_draft"]) assert.ok(names.has(name), name);
+	for (const name of ["review_prepare_document_set", "review_finalize_document", "legal_precedent_search", "legal_precedent_read", "legal_validate_draft", "legal_source_retrieve_details"]) assert.ok(names.has(name), name);
 	for (const name of ["legal_read_document_set", "legal_build_clause_inventory", "legal_audit_commercial_coverage", "legal_validate_review_findings", "legal_render_review_report"]) assert.ok(!names.has(name), name);
 	assert.ok(!names.has("reviewer_perera_start_review"));
 	assert.ok(!names.has("drafter_weeramantry_draft_or_revise"));

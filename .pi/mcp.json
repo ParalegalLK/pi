@@ -2,7 +2,7 @@
 	"mcpServers": {
 		"junior-silva-legal": {
 			"command": "node",
-			"args": ["junior-silva/mcp/server.mjs"],
+			"args": ["junior-silva/mcp/launcher.mjs"],
 			"cwd": ".",
 			"exposure": "direct",
 			"timeout": 1200,
