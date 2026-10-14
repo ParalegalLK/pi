@@ -47,6 +47,43 @@ const handlers = new Map([
 
 export const mcpTools = tools;
 
+function publicArtifact(artifact) {
+	if (!artifact || typeof artifact !== "object" || Array.isArray(artifact)) return undefined;
+	const value = artifact;
+	const result = {};
+	for (const key of ["name", "media_type", "download_url"]) {
+		if (typeof value[key] === "string" && value[key]) result[key] = value[key];
+	}
+	return Object.keys(result).length ? result : undefined;
+}
+
+// A completed multi-document review includes full renderer HTML for the
+// LibreChat extension. It belongs in structuredContent, not in the model-facing
+// text result: embedding it there exceeds Pi's 50 KB tool-result limit and
+// prevents Pi from seeing the download links.
+export function compactToolResult(toolName, output) {
+	if (toolName !== "review_finalize_document" || !output || typeof output !== "object" || Array.isArray(output) || output.completion !== "review-artifacts-ready") return output;
+	const reviews = Array.isArray(output.reviews) ? output.reviews.flatMap((review) => {
+		if (!review || typeof review !== "object" || Array.isArray(review)) return [];
+		const row = {
+			target_id: typeof review.target_id === "string" ? review.target_id : undefined,
+			source_filename: typeof review.source_filename === "string" ? review.source_filename : undefined,
+			reviewed_docx: publicArtifact(review.reviewed_docx),
+			review_markdown: publicArtifact(review.review_markdown),
+			annotation_coverage: review.annotation_coverage && typeof review.annotation_coverage === "object" ? review.annotation_coverage : undefined,
+		};
+		return [Object.fromEntries(Object.entries(row).filter(([, value]) => value !== undefined))];
+	}) : [];
+	return {
+		operation_id: typeof output.operation_id === "string" ? output.operation_id : undefined,
+		completion: output.completion,
+		reviews,
+		reviewed_docx: publicArtifact(output.reviewed_docx),
+		review_markdown: publicArtifact(output.review_markdown),
+		instruction: "Review artifacts are ready. The user-facing response automatically receives their protected download links and LibreChat previews. Summarize the source-grounded findings without exposing internal paths.",
+	};
+}
+
 function progressReporter(token, onProgress) {
 	let progress = 0;
 	return (message) => {
@@ -72,7 +109,7 @@ export async function dispatchMcpRequest(message, { onProgress = () => {} } = {}
 		try {
 			const toolProgress = progressReporter(message.params?._meta?.progressToken, onProgress);
 			const output = await handler(message.params?.arguments || {}, { onProgress: toolProgress });
-			return response({ content: [{ type: "text", text: JSON.stringify(output, null, 2) }], structuredContent: output });
+			return response({ content: [{ type: "text", text: JSON.stringify(compactToolResult(message.params?.name, output), null, 2) }], structuredContent: output });
 		}
 		catch (caught) { return response({ content: [{ type: "text", text: caught instanceof Error ? caught.message : String(caught) }], isError: true }); }
 	}

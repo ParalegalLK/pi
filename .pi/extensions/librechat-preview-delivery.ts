@@ -41,7 +41,7 @@ function artifactRows(event: ToolResultEvent): Array<{ label: string; url: strin
 
 function isPreviewTool(name: string) {
 	return ["librechat_prepare_document_preview", "workbench_publish_artifact", "review_finalize_document"]
-		.some((tool) => name === tool || name.endsWith(`/${tool}`));
+		.some((tool) => name === tool || name.endsWith(`/${tool}`) || name.endsWith(`__${tool}`));
 }
 
 function removeUntrustedHtmlPreview(text: string) {
