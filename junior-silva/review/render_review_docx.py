@@ -50,9 +50,16 @@ def best_range(text, anchor):
 
 
 def comment_text(finding):
+    classification = str(finding.get("classification", "negotiation_point")).lower()
+    labels = {
+        "illegal_non_compliant": ("🔴", "ILLEGAL / NON-COMPLIANT"),
+        "material_commercial_risk": ("🟠", "MATERIAL COMMERCIAL RISK"),
+        "negotiation_point": ("🟡", "NEGOTIATION POINT"),
+    }
+    emoji, label = labels.get(classification, labels["negotiation_point"])
     authorities = "\n".join(finding.get("authority_urls") or [])
     return "\n\n".join(part for part in [
-        f"{finding.get('severity', 'Review finding').upper()} — {finding.get('category', 'commercial').upper()}",
+        f"{emoji} [{label}]",
         f"Explanation: {finding.get('explanation') or 'See the review report.'}",
         f"Recommended protection: {finding.get('recommendation') or 'Consider a proportionate amendment.'}",
         f"Authorities:\n{authorities}" if authorities else "",
@@ -82,8 +89,12 @@ def annotate_paragraph(paragraph, finding):
             chars.append((char, bool(run.bold), bool(run.italic)))
     if not chars:
         return False
-    severity = str(finding.get("severity", "")).lower()
-    color = "FF0000" if "illegal" in severity or "non-compliant" in severity else ("FFC000" if "material" in severity or "high" in severity else "FFFF00")
+    classification = str(finding.get("classification", "negotiation_point")).lower()
+    color = {
+        "illegal_non_compliant": "FF0000",
+        "material_commercial_risk": "FFC000",
+        "negotiation_point": "FFFF00",
+    }.get(classification, "FFFF00")
     paragraph.clear()
     segment = []
     def flush(highlight=False):
@@ -161,11 +172,18 @@ def add_cover(document, title, perspective, findings):
     for index, finding in enumerate(findings, 1):
         cells = table.add_row().cells
         cells[0].text = str(index)
-        cells[1].text = str(finding.get("severity", "Review finding"))
+        labels = {
+            "illegal_non_compliant": "Illegal / Non-compliant",
+            "material_commercial_risk": "Material Commercial Risk",
+            "negotiation_point": "Negotiation Point",
+        }
+        cells[1].text = labels.get(str(finding.get("classification", "")).lower(), "Negotiation Point")
         cells[2].text = str(finding.get("clause_number", "N/A"))
         cells[3].text = str(finding.get("title", "Contractual risk"))
     anchor._p.addprevious(table._tbl)
-    anchor.insert_paragraph_before("Colour key: red = legal/non-compliance risk; orange = material commercial risk; yellow = negotiation point.")
+    anchor.insert_paragraph_before("Red Highlight = Illegal / Non-compliant under Sri Lankan law")
+    anchor.insert_paragraph_before("Orange Highlight = Material commercial risk for the selected party")
+    anchor.insert_paragraph_before("Yellow Highlight = Negotiation point (lawful but worth improving)")
     page = anchor.insert_paragraph_before("")
     page.add_run().add_break(WD_BREAK.PAGE)
 

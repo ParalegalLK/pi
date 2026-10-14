@@ -57,6 +57,32 @@ test("native DOCX review verifies comments and highlights in body and table clau
 	const document = await zip.file("word/document.xml")?.async("string");
 	assert.match(comments || "", /Captures existing tools/);
 	assert.match(comments || "", /No cap/);
+	assert.match(comments || "", /MATERIAL COMMERCIAL RISK/);
 	assert.match(document || "", /commentRangeStart/);
-	assert.match(document || "", /w:shd/);
+	assert.match(document || "", /FFC000/);
+});
+
+test("native renderer uses V2/V3 classifications rather than loose severity wording", async (t) => {
+	const directory = await mkdtemp(path.join(os.tmpdir(), "junior-silva-review-colours-"));
+	t.after(() => rm(directory, { recursive: true, force: true }));
+	const source = path.join(directory, "classification.txt");
+	await (await import("node:fs/promises")).writeFile(source, "1. The agreement waives a mandatory statutory right.\n2. The supplier has uncapped liability.\n3. The client may request monthly reports.\n", "utf8");
+	const prepared = await prepareReviewDocumentSet({ file_path: source, user_context: "Please provide an immediate chat-only review." });
+	const result = await finalizeReviewDocument({
+		review_context_file: prepared.review_context_file,
+		findings: [
+			{ anchor_text: "The agreement waives a mandatory statutory right.", compliance_status: "Illegal", category: "legal", severity: "high", title: "Statutory waiver", explanation: "Conflicts with mandatory law.", recommendation: "Remove the waiver.", authority_urls: ["https://lex.paralegal.lk/example"] },
+			{ anchor_text: "The supplier has uncapped liability.", commercial_impact: "Material Commercial Risk", category: "commercial", severity: "medium", title: "Liability", explanation: "Exposure is uncapped.", recommendation: "Add a cap." },
+			{ anchor_text: "The client may request monthly reports.", commercial_impact: "Negotiation Point", category: "commercial", severity: "high", title: "Reporting", explanation: "Reporting can be scoped.", recommendation: "Define the reporting format." },
+		],
+	});
+	const zip = await JSZip.loadAsync(await readFile(result.reviewed_docx.local_path));
+	const comments = await zip.file("word/comments.xml")?.async("string");
+	const document = await zip.file("word/document.xml")?.async("string");
+	assert.match(comments || "", /ILLEGAL \/ NON-COMPLIANT/);
+	assert.match(comments || "", /MATERIAL COMMERCIAL RISK/);
+	assert.match(comments || "", /NEGOTIATION POINT/);
+	assert.match(document || "", /FF0000/);
+	assert.match(document || "", /FFC000/);
+	assert.match(document || "", /FFFF00/);
 });

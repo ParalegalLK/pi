@@ -1,5 +1,6 @@
 import path from "node:path";
 import { readFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
 import mammoth from "mammoth";
 import pdfParse from "pdf-parse/lib/pdf-parse.js";
 
@@ -15,12 +16,32 @@ async function pdfText(filename) {
 	return result.text;
 }
 
+function run(command, args) {
+	return new Promise((resolve, reject) => {
+		execFile(command, args, { windowsHide: true, maxBuffer: 12 * 1024 * 1024 }, (error, stdout, stderr) => {
+			if (error) return reject(new Error(String(stderr || error.message).trim()));
+			resolve(String(stdout || ""));
+		});
+	});
+}
+
+async function imageText(filename) {
+	// Image attachments are evidence too.  The container supplies Tesseract and
+	// this deliberately returns only OCR text; the original image stays intact.
+	try {
+		return await run("tesseract", [filename, "stdout", "-l", "eng"]);
+	} catch (error) {
+		throw new Error(`Could not OCR ${path.basename(filename)}. Upload a readable PDF/DOCX or a clearer image. ${error.message}`);
+	}
+}
+
 export async function extractDocumentText(filename) {
 	const extension = path.extname(filename).toLowerCase();
 	if ([".txt", ".md", ".json"].includes(extension)) return readFile(filename, "utf8");
 	if (extension === ".docx") return docxText(filename);
 	if (extension === ".pdf") return pdfText(filename);
-	throw new Error(`Multi-document review cannot extract ${extension || "this file type"}; convert it to PDF, DOCX, Markdown, or text first.`);
+	if ([".png", ".jpg", ".jpeg"].includes(extension)) return imageText(filename);
+	throw new Error(`Multi-document review cannot extract ${extension || "this file type"}; convert it to PDF, DOCX, Markdown, text, or a supported image first.`);
 }
 
 export async function buildReviewPacket(files, primaryFile) {

@@ -10,7 +10,7 @@ ENV NODE_ENV=production \
 
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates libreoffice-impress libreoffice-writer pandoc poppler-utils python3 python3-pip python3-defusedxml \
+      ca-certificates libreoffice-impress libreoffice-writer pandoc poppler-utils python3 python3-pip python3-defusedxml tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 # bayoo-docx adds Word comments to the standard python-docx API. The native
 # review renderer uses it to keep comments and highlights at source clauses.

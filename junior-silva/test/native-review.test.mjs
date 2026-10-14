@@ -30,7 +30,7 @@ test("native review creates a document set and accepts only source-anchored find
 	t.after(() => rm(fixture.directory, { recursive: true, force: true }));
 	const set = await readDocumentSet({ file_paths: [fixture.primary, fixture.annexure], primary_file_path: fixture.primary, user_context: "Protect the Developer." });
 	assert.equal(set.documents.length, 2);
-	assert.equal(set.documents.find((item) => item.role === "primary")?.path, path.resolve(fixture.primary));
+	assert.equal(set.documents.find((item) => item.role === "review_target")?.path, path.resolve(fixture.primary));
 	assert.match(await readFile(set.packet_file, "utf8"), /background intellectual property/i);
 
 	const inventory = await buildClauseInventory({ file_path: fixture.primary });
@@ -82,6 +82,33 @@ test("immediate or chat-only review is the narrow evidence-checkpoint exception"
 	t.after(() => rm(fixture.directory, { recursive: true, force: true }));
 	const prepared = await prepareReviewDocumentSet({ file_path: fixture.primary, user_context: "Please provide an immediate chat-only review." });
 	assert.equal(prepared.checkpoint.status, "not_required");
+});
+
+test("native review finalises every review target while retaining annexures as supporting evidence", async (t) => {
+	const directory = await mkdtemp(path.join(os.tmpdir(), "junior-silva-multi-review-"));
+	t.after(() => rm(directory, { recursive: true, force: true }));
+	const first = path.join(directory, "service-agreement.txt");
+	const second = path.join(directory, "data-processing-agreement.txt");
+	const annexure = path.join(directory, "Annex A.txt");
+	await writeFile(first, "6.1 Ownership\nThe Supplier assigns all existing tools to the Client.\n", "utf8");
+	await writeFile(second, "4.2 Liability\nThe Processor has unlimited liability for all losses.\n", "utf8");
+	await writeFile(annexure, "Annex A sets operational service levels only.\n", "utf8");
+	const prepared = await prepareReviewDocumentSet({ file_paths: [first, second, annexure], user_context: "Protect the Supplier." });
+	assert.deepEqual(prepared.review_targets.map((target) => target.filename), ["service-agreement.txt", "data-processing-agreement.txt"]);
+	await recordReviewCheckpointOutcome({ review_context_file: prepared.review_context_file, outcome: "skip", user_response: "skip" });
+	const result = await finalizeReviewDocument({
+		review_context_file: prepared.review_context_file,
+		perspective: "Supplier",
+		findings: [
+			{ target_id: "review-target-1", clause_number: "6.1", anchor_text: "The Supplier assigns all existing tools to the Client.", commercial_impact: "Material Commercial Risk", category: "commercial", title: "Background IP", explanation: "The assignment captures existing tools.", recommendation: "Carve out background IP." },
+			{ target_id: "review-target-2", clause_number: "4.2", anchor_text: "The Processor has unlimited liability for all losses.", commercial_impact: "Material Commercial Risk", category: "commercial", title: "Unlimited liability", explanation: "The clause has no proportionate cap.", recommendation: "Add a cap." },
+		],
+	});
+	assert.equal(result.reviews.length, 2);
+	assert.ok(result.reviews.every((review) => review.annotation_coverage.annotated_count === 1));
+	assert.ok(result.reviews.every((review) => review.reviewed_docx.name.startsWith("Reviewed_")));
+	assert.ok(result.reviews.every((review) => review.reviewed_docx.download_url));
+	assert.ok(result.artifact_markups.length === 2);
 });
 
 test("native review coverage and draft validation expose evidence and unresolved placeholders", async (t) => {

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { buildReviewPacket, extractDocumentText } from "./document-text.mjs";
-import { inputFile, operationDirectory, saveJson, describeArtifact } from "./files.mjs";
+import { inputFile, operationDirectory, saveJson, describeArtifact, safeFilename } from "./files.mjs";
 import { renderReviewDocx } from "./review-render.mjs";
 import { preparePreview } from "./previews.mjs";
 
@@ -74,6 +74,15 @@ function normalisedFinding(value, inventory, source) {
 	const item = value && typeof value === "object" ? value : {};
 	const anchor = String(item.anchor_text || item.issue_text || item.flagged_clause || "").trim();
 	const matchingClause = inventory.find((clause) => hasSourceAnchor(clause.text, anchor));
+	const authorityUrls = Array.isArray(item.authority_urls) ? item.authority_urls.filter((url) => typeof url === "string" && /^https?:\/\//i.test(url)) : [];
+	const compliance = normalized(item.compliance_status || item.classification);
+	const commercialImpact = normalized(item.commercial_impact || item.severity);
+	const requestedIllegal = compliance === "illegal" || compliance === "illegal / non-compliant" || /\billegal\b|non-compliant/.test(compliance);
+	const classification = requestedIllegal && authorityUrls.length
+		? "illegal_non_compliant"
+		: commercialImpact === "material commercial risk" || normalized(item.classification) === "material commercial risk"
+			? "material_commercial_risk"
+			: "negotiation_point";
 	return {
 		accepted: hasSourceAnchor(source, anchor),
 		finding: {
@@ -81,22 +90,55 @@ function normalisedFinding(value, inventory, source) {
 			clause_number: String(item.clause_number || matchingClause?.clause_number || "N/A"),
 			anchor_text: anchor,
 			category: String(item.category || item.review_axis || "commercial").toLowerCase() === "legal" ? "legal" : "commercial",
+			classification,
 			severity: String(item.severity || item.commercial_impact || item.compliance_status || "negotiation point").toLowerCase(),
 			title: String(item.title || item.legal_concept || "Contractual risk").trim(),
 			explanation: String(item.explanation || "").trim(),
 			recommendation: String(item.recommendation || item.suggestion || "").trim(),
-			authority_urls: Array.isArray(item.authority_urls) ? item.authority_urls.filter((url) => typeof url === "string" && /^https?:\/\//i.test(url)) : [],
+			authority_urls: authorityUrls,
 		},
 	};
 }
 
+function likelySupporting(filename) {
+	return /(?:annex(?:ure)?|appendix|schedule|exhibit|attachment|support(?:ing)?|evidence|correspondence|notice|invoice|statement)/i.test(path.basename(filename));
+}
+
+function requestedPaths(args) {
+	const values = [
+		...(Array.isArray(args.file_paths) ? args.file_paths : []),
+		...(Array.isArray(args.review_file_paths) ? args.review_file_paths : []),
+		...(Array.isArray(args.supporting_file_paths) ? args.supporting_file_paths : []),
+		...(args.file_path ? [args.file_path] : []),
+		...(args.primary_file_path ? [args.primary_file_path] : []),
+	];
+	return [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))];
+}
+
+function targetSelection(args, files) {
+	const explicitTargets = new Set([
+		...(Array.isArray(args.review_file_paths) ? args.review_file_paths : []),
+		...(args.primary_file_path ? [args.primary_file_path] : []),
+	].map((item) => path.resolve(item)));
+	const explicitSupporting = new Set((Array.isArray(args.supporting_file_paths) ? args.supporting_file_paths : []).map((item) => path.resolve(item)));
+	const hasExplicitTargets = explicitTargets.size > 0;
+	return files.map((file) => {
+		const absolute = file.absolute;
+		const role = explicitSupporting.has(absolute) ? "supporting"
+			: explicitTargets.has(absolute) ? "review_target"
+			: hasExplicitTargets ? "supporting"
+			: likelySupporting(file.name) ? "supporting" : "review_target";
+		return { ...file, role };
+	});
+}
+
 export async function readDocumentSet(args, { onProgress = () => {} } = {}) {
-	const filePaths = Array.isArray(args.file_paths) ? args.file_paths : [];
-	const requested = [...new Set([...filePaths, ...(args.file_path ? [args.file_path] : []), ...(args.primary_file_path ? [args.primary_file_path] : [])])];
+	const requested = requestedPaths(args);
 	if (!requested.length) throw new Error("Provide primary_file_path, file_path, or file_paths.");
 	onProgress("Reading the supplied legal documents and supporting evidence…");
-	const files = await Promise.all(requested.map((filename) => inputFile(filename)));
-	const primary = path.resolve(args.primary_file_path || files[0].absolute);
+	const inputs = await Promise.all(requested.map((filename) => inputFile(filename)));
+	const files = targetSelection(args, inputs);
+	if (!files.some((file) => file.role === "review_target")) throw new Error("Select at least one document to review.");
 	const documents = [];
 	for (const file of files) {
 		const text = (await extractDocumentText(file.absolute)).trim();
@@ -105,23 +147,25 @@ export async function readDocumentSet(args, { onProgress = () => {} } = {}) {
 			path: file.absolute,
 			filename: file.name,
 			sha256: createHash("sha256").update(file.bytes).digest("hex"),
-			role: file.absolute === primary ? "primary" : "supporting",
+			role: file.role,
 			characters: text.length,
 			excerpt: text.slice(0, 1800),
 		});
 	}
 	const operation = await operationDirectory("native-review-context");
 	const packetFile = path.join(operation.directory, "document-set.md");
-	await writeFile(packetFile, await buildReviewPacket(documents.map((document) => document.path), primary), "utf8");
+	const primary = documents.find((document) => document.role === "review_target");
+	await writeFile(packetFile, await buildReviewPacket(documents.map((document) => document.path), primary.path), "utf8");
 	const ledgerFile = await saveJson(operation.directory, "document-ledger.json", {
-		created_at: new Date().toISOString(), primary_file: primary, documents, user_context: String(args.user_context || "").trim(),
+		created_at: new Date().toISOString(), primary_file: primary.path, review_targets: documents.filter((document) => document.role === "review_target").map((document) => document.path), documents, user_context: String(args.user_context || "").trim(),
 	});
 	return {
 		operation_id: operation.id,
 		documents,
 		packet_file: packetFile,
 		ledger_file: ledgerFile,
-		instruction: "Read this packet before asking more questions or reviewing. Supporting documents may answer earlier questions; identify what they resolve and ask only for genuinely missing facts.",
+		review_targets: documents.filter((document) => document.role === "review_target"),
+		instruction: "Read this packet before asking more questions or reviewing. Every review_target requires its own annotated deliverable. Supporting documents may answer earlier questions; identify what they resolve and ask only for genuinely missing facts.",
 	};
 }
 
@@ -132,30 +176,36 @@ export async function readDocumentSet(args, { onProgress = () => {} } = {}) {
  */
 export async function prepareReviewDocumentSet(args, { onProgress = () => {} } = {}) {
 	const documentSet = await readDocumentSet(args, { onProgress });
-	const primary = documentSet.documents.find((document) => document.role === "primary");
-	if (!primary) throw new Error("A primary review document could not be identified.");
-	onProgress("Mapping the primary document and checking material commercial coverage…");
-	const source = await extractDocumentText(primary.path);
-	const clauses = clauseInventory(source);
-	const dimensions = DIMENSIONS.map(([dimension, terms]) => {
-		const evidence = clauses.filter((clause) => terms.some((term) => normalized(clause.text).includes(term)))
-			.map((clause) => clause.clause_number).filter((item, index, values) => values.indexOf(item) === index);
-		return { dimension, status: evidence.length ? "addressed" : "not_present", evidence_clause_numbers: evidence };
-	});
+	const reviewTargets = documentSet.review_targets;
+	if (!reviewTargets.length) throw new Error("A review target could not be identified.");
+	onProgress("Mapping every selected review document and checking material commercial coverage…");
 	const operation = await operationDirectory("review-preparation");
-	const sourceTextFile = path.join(operation.directory, "primary-source.txt");
-	await writeFile(sourceTextFile, source, "utf8");
+	const targets = [];
+	for (const [index, target] of reviewTargets.entries()) {
+		const source = await extractDocumentText(target.path);
+		const clauses = clauseInventory(source);
+		const dimensions = DIMENSIONS.map(([dimension, terms]) => {
+			const evidence = clauses.filter((clause) => terms.some((term) => normalized(clause.text).includes(term)))
+				.map((clause) => clause.clause_number).filter((item, position, values) => values.indexOf(item) === position);
+			return { dimension, status: evidence.length ? "addressed" : "not_present", evidence_clause_numbers: evidence };
+		});
+		const sourceTextFile = path.join(operation.directory, `review-target-${index + 1}-source.txt`);
+		await writeFile(sourceTextFile, source, "utf8");
+		targets.push({ id: `review-target-${index + 1}`, file: target.path, filename: target.filename, source_text_file: sourceTextFile, clauses, commercial_coverage: dimensions });
+	}
+	const primary = targets[0];
 	const checkpointRequired = requiresEvidenceCheckpoint(args.user_context);
 	const contextFile = await saveJson(operation.directory, "review-context.json", {
 		created_at: new Date().toISOString(),
-		primary_file: primary.path,
+		primary_file: primary.file,
 		primary_filename: primary.filename,
-		source_text_file: sourceTextFile,
+		source_text_file: primary.source_text_file,
 		document_packet: documentSet.packet_file,
 		document_ledger: documentSet.ledger_file,
 		documents: documentSet.documents,
-		clauses,
-		commercial_coverage: dimensions,
+		targets,
+		clauses: primary.clauses,
+		commercial_coverage: primary.commercial_coverage,
 		user_context: String(args.user_context || "").trim(),
 		checkpoint: {
 			required: checkpointRequired,
@@ -168,15 +218,16 @@ export async function prepareReviewDocumentSet(args, { onProgress = () => {} } =
 	return {
 		operation_id: operation.id,
 		review_context_file: contextFile,
-		primary_file: primary.path,
+		primary_file: primary.file,
 		primary_filename: primary.filename,
+		review_targets: targets.map((target) => ({ id: target.id, file: target.file, filename: target.filename })),
 		document_packet: documentSet.packet_file,
 		document_ledger: documentSet.ledger_file,
-		clause_inventory: clauses,
-		commercial_coverage: dimensions,
+		clause_inventory: primary.clauses,
+		commercial_coverage: primary.commercial_coverage,
 		checkpoint: { required: checkpointRequired, status: checkpointRequired ? "pending" : "not_required" },
 		instruction: checkpointRequired
-			? "This preparation contains all supplied evidence, source anchors, and coverage prompts. Review the packet before deciding whether a short factual question is necessary. Do not invent an answer to any question. Before calling review_finalize_document, ask the user once whether they want to provide more relevant evidence; they may upload it, answer, say 'review normally', or say 'skip'. After an actual user response, call review_record_checkpoint_outcome. Do not record an outcome yourself in the same turn."
+			? "This preparation contains all supplied evidence, source anchors, and coverage prompts. Review every review target before deciding whether a short factual question is necessary. Do not invent an answer to any question. Before calling review_finalize_document, ask the user once whether they want to provide more relevant evidence; they may upload it, answer, say 'review normally', or say 'skip'. After an actual user response, call review_record_checkpoint_outcome. Do not record an outcome yourself in the same turn. Findings must identify target_id when more than one document is selected."
 			: "This preparation contains all supplied evidence, source anchors, and coverage prompts. The user expressly requested immediate/chat-only review, so complete the source-grounded review without an evidence checkpoint.",
 	};
 }
@@ -253,12 +304,38 @@ function markdownReview(title, perspective, accepted) {
 		...accepted.flatMap((item, index) => [
 			"### " + (index + 1) + ". " + item.title + " — Clause " + item.clause_number, "",
 			"**Source clause:** " + item.anchor_text, "",
-			"**Category:** " + item.category + "; **severity:** " + item.severity, "",
+			"**Classification:** " + item.classification.replaceAll("_", " ") + "; **severity:** " + item.severity, "",
 			item.explanation || "Further legal/commercial explanation is required.", "",
 			"**Recommended protection:** " + (item.recommendation || "Specify a negotiated amendment."), "",
 			...(item.authority_urls.length ? ["**Authorities:** " + item.authority_urls.map((url) => `[source](${url})`).join("; "), ""] : []),
 		]),
 	].join("\n").trim() + "\n";
+}
+
+function findingsForTarget(findings, target, targetCount) {
+	const accepted = [];
+	const rejected = [];
+	const seen = new Set();
+	for (const candidate of findings) {
+		const requestedTarget = String(candidate?.target_id || candidate?.target_file || candidate?.source_file || "").trim();
+		if (requestedTarget && requestedTarget !== target.id && path.resolve(requestedTarget) !== path.resolve(target.file)) continue;
+		const result = normalisedFinding(candidate, target.clauses, target.source);
+		const explicitOtherTarget = requestedTarget && requestedTarget !== target.id && path.resolve(requestedTarget) !== path.resolve(target.file);
+		if (explicitOtherTarget) continue;
+		if (!result.accepted) {
+			if (!requestedTarget && targetCount > 1) continue;
+			rejected.push({ finding: result.finding, reason: "The proposed source anchor was not found reliably in this review target." });
+			continue;
+		}
+		const key = normalized(result.finding.anchor_text) + "\0" + result.finding.classification;
+		if (!seen.has(key)) { seen.add(key); accepted.push(result.finding); }
+	}
+	return { accepted, rejected };
+}
+
+function reviewName(filename, extension) {
+	const base = safeFilename(path.basename(filename, path.extname(filename)), "document").replace(/\s+/g, "_");
+	return `${base}${extension}`;
 }
 
 /** Validate source-grounded findings and create the final Markdown + DOCX review deliverables. */
@@ -274,44 +351,45 @@ export async function finalizeReviewDocument(args, { onProgress = () => {} } = {
 			instruction: "Do not finalise yet. Ask the user whether they have further relevant agreements, correspondence, notices, policies, records, or evidence to provide. They may upload it, answer a focused question, say 'review normally', or say 'skip'. Wait for the actual user response, then call review_record_checkpoint_outcome before retrying finalisation.",
 		};
 	}
-	const source = await readFile(context.source_text_file, "utf8");
-	const inventory = Array.isArray(context.clauses) ? context.clauses : clauseInventory(source);
-	onProgress("Validating proposed findings against the exact primary-document wording…");
-	const accepted = [];
-	const rejected = [];
-	const seen = new Set();
-	for (const candidate of args.findings) {
-		const result = normalisedFinding(candidate, inventory, source);
-		const key = normalized(result.finding.anchor_text) + "\0" + result.finding.category;
-		if (!result.accepted) rejected.push({ finding: result.finding, reason: "The proposed source anchor was not found reliably in the primary document." });
-		else if (!seen.has(key)) { seen.add(key); accepted.push(result.finding); }
-	}
-	if (!accepted.length) throw new Error("No findings could be anchored reliably in the source document. Refine the exact anchor_text before finalising.");
+	const storedTargets = Array.isArray(context.targets) && context.targets.length ? context.targets : [{ id: "review-target-1", file: context.primary_file, filename: context.primary_filename, source_text_file: context.source_text_file, clauses: context.clauses, commercial_coverage: context.commercial_coverage }];
+	const targets = await Promise.all(storedTargets.map(async (target) => ({ ...target, source: await readFile(target.source_text_file, "utf8"), clauses: Array.isArray(target.clauses) ? target.clauses : clauseInventory(await readFile(target.source_text_file, "utf8")) })));
+	onProgress("Validating proposed findings against every selected review document…");
+	const grouped = targets.map((target) => ({ target, ...findingsForTarget(args.findings, target, targets.length) }));
+	const allAccepted = grouped.flatMap((item) => item.accepted);
+	const allRejected = grouped.flatMap((item) => item.rejected);
+	if (!allAccepted.length) throw new Error("No findings could be anchored reliably in the selected review documents. Refine exact anchor_text and, for multiple documents, identify target_id.");
 	const operation = await operationDirectory("review-final");
-	const findingsFile = await saveJson(operation.directory, "validated-findings.json", { source_file: context.primary_file, accepted, rejected });
-	const title = String(args.title || `Legal Review — ${context.primary_filename}`).trim();
 	const perspective = String(args.perspective || "Not specified").trim();
-	const reportFile = path.join(operation.directory, "legal-review.md");
-	await writeFile(reportFile, markdownReview(title, perspective, accepted), "utf8");
-	const docxFile = path.join(operation.directory, "Reviewed_document.docx");
-	onProgress("Creating the source-anchored reviewed DOCX and clause-by-clause report…");
-	const render = await renderReviewDocx({ sourceFile: context.primary_file, sourceTextFile: context.source_text_file, findingsFile, outputFile: docxFile, title, perspective });
-	const annotation = JSON.parse(render.stdout || "{}");
-	if (annotation.annotated_count !== accepted.length) {
-		throw new Error(`Reviewed DOCX annotation coverage is incomplete (${annotation.annotated_count || 0}/${accepted.length}). Refine anchor_text to match the original Word clauses before finalising.`);
+	const reviews = [];
+	for (const { target, accepted, rejected } of grouped) {
+		if (!accepted.length) continue;
+		const findingsFile = await saveJson(operation.directory, `${reviewName(target.filename, "")}-validated-findings.json`, { source_file: target.file, accepted, rejected });
+		const title = String(args.title || `Legal Review — ${target.filename}`).trim();
+		const reportFile = path.join(operation.directory, `legal-review-${reviewName(target.filename, ".md")}`);
+		await writeFile(reportFile, markdownReview(title, perspective, accepted), "utf8");
+		const docxFile = path.join(operation.directory, `Reviewed_${reviewName(target.filename, ".docx")}`);
+		onProgress(`Creating the source-anchored reviewed DOCX for ${target.filename}…`);
+		const render = await renderReviewDocx({ sourceFile: target.file, sourceTextFile: target.source_text_file, findingsFile, outputFile: docxFile, title, perspective });
+		const annotation = JSON.parse(render.stdout || "{}");
+		if (annotation.annotated_count !== accepted.length) throw new Error(`Reviewed DOCX annotation coverage is incomplete for ${target.filename} (${annotation.annotated_count || 0}/${accepted.length}). Refine anchor_text before finalising.`);
+		const preview = await preparePreview(docxFile, `Reviewed ${path.basename(target.filename, path.extname(target.filename))}`);
+		reviews.push({ target_id: target.id, source_filename: target.filename, accepted, rejected, findings_file: findingsFile, review_markdown: describeArtifact(reportFile, operation.id), reviewed_docx: describeArtifact(docxFile, operation.id), annotation_coverage: annotation, artifact_markup: preview.markup });
 	}
-	const preview = await preparePreview(docxFile, "Reviewed document");
+	if (!reviews.length) throw new Error("No review target has source-anchored findings to publish.");
+	const first = reviews[0];
 	return {
 		operation_id: operation.id,
 		completion: "review-artifacts-ready",
-		accepted,
-		rejected,
-		findings_file: findingsFile,
-		review_markdown: describeArtifact(reportFile, operation.id),
-		reviewed_docx: describeArtifact(docxFile, operation.id),
-		annotation_coverage: annotation,
-		artifact_markup: preview.markup,
-		instruction: "The review deliverables are complete. Give the user the Reviewed_document.docx and legal-review.md artifacts. The reviewed DOCX annotation coverage has been verified. Do not claim rejected findings as source-grounded. If additional evidence arrives, run review_prepare_document_set again with the entire document set before finalising a revised review.",
+		accepted: allAccepted,
+		rejected: allRejected,
+		reviews,
+		findings_file: first.findings_file,
+		review_markdown: first.review_markdown,
+		reviewed_docx: first.reviewed_docx,
+		annotation_coverage: first.annotation_coverage,
+		artifact_markup: first.artifact_markup,
+		artifact_markups: reviews.map((item) => item.artifact_markup),
+		instruction: "The review deliverables are complete. Give the user the protected download links for every reviewed DOCX and Markdown report returned in reviews. The reviewed DOCX annotation coverage has been verified. Do not expose local paths or file URIs. Do not claim rejected findings as source-grounded. If additional evidence arrives, run review_prepare_document_set again with the entire document set before finalising a revised review.",
 	};
 }
 
