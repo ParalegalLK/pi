@@ -3,12 +3,13 @@ import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
-import { appendFile, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { artifactsRoot, env, projectRoot, requiredEnv, uploadsRoot, workspaceRoot } from "../core/environment.mjs";
 import { mimeType, resolveArtifactRequest, safeFilename } from "../core/files.mjs";
 import { dispatchMcpRequest } from "../mcp/server.mjs";
+import { addAssistantUsage, createUsageTotals, openAiUsage, requestsStreamUsage } from "./usage.mjs";
 
 const PORT = Number(env("JUNIOR_SILVA_PORT", "8126"));
 const HOST = env("JUNIOR_SILVA_BIND_HOST", "127.0.0.1");
@@ -227,6 +228,47 @@ async function audit(sessionId, event) {
 	await appendFile(path.join(auditRoot, `${sessionId}.jsonl`), `${line}\n`, "utf8");
 }
 
+async function sessionFileSizes() {
+	const sizes = new Map();
+	try {
+		const entries = await readdir(SESSION_ROOT, { withFileTypes: true });
+		for (const entry of entries) {
+			if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+			const file = path.join(SESSION_ROOT, entry.name);
+			sizes.set(file, (await stat(file)).size);
+		}
+	} catch (caught) {
+		if (caught?.code !== "ENOENT") throw caught;
+	}
+	return sizes;
+}
+
+async function appendedSessionUsage(sizesBefore) {
+	const totals = createUsageTotals();
+	let changedFiles = 0;
+	try {
+		const entries = await readdir(SESSION_ROOT, { withFileTypes: true });
+		for (const entry of entries) {
+			if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+			const file = path.join(SESSION_ROOT, entry.name);
+			const offset = sizesBefore.get(file) || 0;
+			if ((await stat(file)).size <= offset) continue;
+			changedFiles += 1;
+			const contents = await readFile(file);
+			for (const line of contents.subarray(offset).toString("utf8").split(/\r?\n/)) {
+				if (!line.trim()) continue;
+				try {
+					const event = JSON.parse(line);
+					if (event.type === "message" && event.message?.role === "assistant") addAssistantUsage(totals, event.message.usage);
+				} catch { }
+			}
+		}
+	} catch (caught) {
+		if (caught?.code !== "ENOENT") throw caught;
+	}
+	return changedFiles === 1 ? totals : undefined;
+}
+
 async function runPi(prompt, sessionId, onProgress) {
 	// Hosted Pi uses administrator-owned legal MCP registration. Its normal built-in
 	// tools remain subject to the legal-scope extension and deployment sandbox.
@@ -244,11 +286,22 @@ async function runPi(prompt, sessionId, onProgress) {
 	if (env("PI_THINKING")) args.push("--thinking", env("PI_THINKING"));
 	args.push(prompt);
 	await mkdir(SESSION_ROOT, { recursive: true });
+	const sessionSizesBefore = await sessionFileSizes();
+	const startedAt = Date.now();
 	return new Promise((resolve, reject) => {
 		const child = spawn(process.execPath, args, { cwd: projectRoot, env: agentEnvironment(), stdio: ["ignore", "pipe", "pipe"] });
 		let buffer = "";
 		let stderr = "";
 		let finalText = "";
+		const usageTotals = createUsageTotals();
+		const usageResponseIds = new Set();
+		const recordAssistantUsage = (message) => {
+			if (!message?.usage) return;
+			const key = message.responseId || `${message.timestamp || ""}:${message.usage.totalTokens || ""}:${message.usage.input || ""}:${message.usage.output || ""}`;
+			if (usageResponseIds.has(key)) return;
+			usageResponseIds.add(key);
+			addAssistantUsage(usageTotals, message.usage);
+		};
 		child.stdout.on("data", (chunk) => {
 			buffer += chunk.toString();
 			const lines = buffer.split(/\r?\n/);
@@ -256,6 +309,9 @@ async function runPi(prompt, sessionId, onProgress) {
 			for (const line of lines) {
 				try {
 					const event = JSON.parse(line);
+					if (event.type === "message_update" && event.assistantMessageEvent?.type === "message_end") {
+						recordAssistantUsage({ ...event.assistantMessageEvent.message, usage: event.usage });
+					}
 					if (event.type === "message_end" && event.message?.role === "custom" && event.message?.customType === "junior-silva-scope" && typeof event.message?.content === "string") finalText = event.message.content;
 					if (event.type === "agent_start") onProgress("Pi is planning the requested legal work…");
 					if (event.type === "tool_execution_start") {
@@ -270,7 +326,11 @@ async function runPi(prompt, sessionId, onProgress) {
 						void audit(sessionId, { type: "tool", tool: safeAuditToolName(tool), status: event.isError ? "error" : "completed" }).catch(() => {});
 						if (event.isError) onProgress("A specialist tool reported a problem; Pi is deciding the next safe step…");
 					}
-					if (event.type === "message_end" && event.message?.role === "assistant") finalText = (event.message.content || []).filter((part) => part.type === "text").map((part) => part.text || "").join("\n");
+					if (event.type === "message" && event.message?.role === "assistant") recordAssistantUsage(event.message);
+					if (event.type === "message_end" && event.message?.role === "assistant") {
+						finalText = (event.message.content || []).filter((part) => part.type === "text").map((part) => part.text || "").join("\n");
+						recordAssistantUsage(event.message);
+					}
 				} catch { }
 			}
 		});
@@ -281,7 +341,9 @@ async function runPi(prompt, sessionId, onProgress) {
 			clearTimeout(timeout);
 			if (code !== 0) return reject(new Error(`Pi exited with code ${code}: ${stderr.replace(/\s+/g, " ").slice(0, 1200)}`));
 			if (!finalText.trim()) return reject(new Error("Pi returned no final answer"));
-			resolve(finalText.trim());
+			void appendedSessionUsage(sessionSizesBefore).then((persistedUsage) => {
+				resolve({ answer: finalText.trim(), usage: openAiUsage(persistedUsage) || openAiUsage(usageTotals), elapsedMs: Date.now() - startedAt });
+			}).catch(reject);
 		});
 	});
 }
@@ -304,9 +366,10 @@ function streamDelta(res, id, field, value) {
 	res.write(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: MODEL, choices: [{ index: 0, delta: { [field]: value }, finish_reason: null }] })}\n\n`);
 }
 
-function finishStream(res, id, answer) {
+function finishStream(res, id, answer, usage) {
 	for (let offset = 0; offset < answer.length; offset += 1200) streamDelta(res, id, "content", answer.slice(offset, offset + 1200));
 	res.write(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: MODEL, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`);
+	if (usage) res.write(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: MODEL, choices: [], usage })}\n\n`);
 	res.end("data: [DONE]\n\n");
 }
 
@@ -363,11 +426,12 @@ const server = createServer(async (req, res) => {
 			const files = await conversationUploadPaths(key);
 			const id = `chatcmpl-${randomUUID()}`;
 			const streaming = body.stream !== false;
+			const includeStreamUsage = requestsStreamUsage(body);
 			if (streaming) { startStream(res, id); heartbeat = setInterval(() => res.write(": keep-alive\n\n"), 15_000); }
-			const answer = await serial(key, () => runPi(piPrompt(uploadText.instruction, files), `junior-silva-v2-${key}`, (message) => { if (streaming) streamDelta(res, id, "reasoning_content", `${message}\n`); }));
+			const result = await serial(key, () => runPi(piPrompt(uploadText.instruction, files), `junior-silva-v2-${key}`, (message) => { if (streaming) streamDelta(res, id, "reasoning_content", `${message}\n`); }));
 			if (heartbeat) clearInterval(heartbeat);
-			if (streaming) return finishStream(res, id, answer);
-			return json(res, 200, { id, object: "chat.completion", created: Math.floor(Date.now() / 1000), model: MODEL, choices: [{ index: 0, message: { role: "assistant", content: answer }, finish_reason: "stop" }] });
+			if (streaming) return finishStream(res, id, result.answer, includeStreamUsage ? result.usage : undefined);
+			return json(res, 200, { id, object: "chat.completion", created: Math.floor(Date.now() / 1000), model: MODEL, choices: [{ index: 0, message: { role: "assistant", content: result.answer }, finish_reason: "stop" }], ...(result.usage ? { usage: result.usage } : {}) });
 		}
 		return json(res, 404, { error: { message: "Not found", type: "invalid_request_error" } });
 	} catch (error) {
