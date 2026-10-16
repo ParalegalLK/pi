@@ -1,0 +1,12 @@
+{
+	"mcpServers": {
+		"junior-silva-legal": {
+			"command": "node",
+			"args": ["junior-silva/mcp/launcher.mjs"],
+			"cwd": ".",
+			"exposure": "direct",
+			"timeout": 1200,
+			"description": "Independent tools for Sri Lankan legal research, source-anchored native document review, native drafting, and English/Sinhala/Tamil translation."
+		}
+	}
+}

@@ -1,0 +1,1 @@
+This is a synthetic lease notice for integration testing. The tenant shall pay the monthly rent on the first day of each month.
