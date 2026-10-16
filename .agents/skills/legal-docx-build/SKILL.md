@@ -21,6 +21,16 @@ This skill runs inside LibreChat's code sandbox. By the time it is invoked, the 
 bash skills/legal-docx-build/build-legal-docx.sh <source.md> [source2.md ...] <output.docx>
 ```
 
+### Windows Pi CLI fallback
+
+The full Bash/Pandoc pipeline is normally used in the Linux/Docker runtime. In the Windows Pi CLI, first check whether `pandoc` is available. If it is unavailable, do **not** give up or place a draft in a project `tmp` folder. Write the Markdown under `JUNIOR_SILVA_WORKSPACE_ROOT`, then use the portable WSL renderer:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .agents/skills/legal-docx-build/build-legal-docx-portable.ps1 -Source "$env:JUNIOR_SILVA_WORKSPACE_ROOT\plaint.md" -Output "$env:JUNIOR_SILVA_WORKSPACE_ROOT\Plaint.docx"
+```
+
+The fallback preserves authored numbering, headings, bullets and emphasis in a court-readable DOCX. It does not reproduce the full Pandoc TOC/auto-numbering pipeline. After either renderer succeeds, call `workbench_publish_artifact` with the completed file path.
+
 The **last** argument is always the output path; everything before it is input Markdown (concatenated in order). The output directory is created if missing.
 
 Examples:

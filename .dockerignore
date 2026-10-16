@@ -5,6 +5,9 @@ junior-silva/node_modules
 junior-silva/artifacts
 junior-silva/uploads
 junior-silva/sessions
+junior-silva/audit
+junior-silva/pi-agent
+junior-silva/workspace
 *.log
 .vscode
 .idea

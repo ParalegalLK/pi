@@ -152,6 +152,90 @@ async function pdfPreview(filename, bytes) {
 	return { title, kind: "pdf", markup: artifactBlock(`${slug(title)}-preview`, `${title} — Preview`, documentHtml(title, paragraphs || "<p>No extractable PDF text was available.</p>", "Text preview generated locally from the PDF. The downloadable PDF remains the authoritative visual document.")) };
 }
 
+function descendantsByName(node, name) {
+	const found = [];
+	for (const child of childElements(node)) {
+		if (localName(child) === name) found.push(child);
+		found.push(...descendantsByName(child, name));
+	}
+	return found;
+}
+
+function spreadsheetCellValue(cell, sharedStrings) {
+	const type = attr(cell, "t");
+	const raw = descendantsByName(cell, "v")[0] ? nodeText(descendantsByName(cell, "v")[0]) : "";
+	if (type === "s") return sharedStrings[Number(raw)] || "";
+	if (type === "inlineStr") return descendantsByName(cell, "t").map(nodeText).join("");
+	return raw;
+}
+
+function spreadsheetPosition(reference, fallbackIndex) {
+	const match = /^([A-Z]+)(\d+)$/i.exec(reference || "");
+	if (!match) return { row: Math.floor(fallbackIndex / 12) + 1, column: (fallbackIndex % 12) + 1 };
+	const column = [...match[1].toUpperCase()].reduce((total, letter) => total * 26 + letter.charCodeAt(0) - 64, 0);
+	return { row: Number(match[2]), column };
+}
+
+async function xlsxPreview(filename, bytes) {
+	const title = displayTitle(filename);
+	const zip = await JSZip.loadAsync(bytes, { checkCRC32: true });
+	const sharedFile = zip.file("xl/sharedStrings.xml");
+	const sharedStrings = sharedFile
+		? descendantsByName(parseXml(await sharedFile.async("string")).documentElement, "si").map(nodeText)
+		: [];
+	const sheetFiles = Object.keys(zip.files)
+		.filter((name) => /^xl\/worksheets\/sheet\d+\.xml$/i.test(name))
+		.sort((left, right) => Number(/sheet(\d+)/i.exec(left)?.[1]) - Number(/sheet(\d+)/i.exec(right)?.[1]))
+		.slice(0, 4);
+	const workbookFile = zip.file("xl/workbook.xml");
+	const sheetNames = workbookFile
+		? descendantsByName(parseXml(await workbookFile.async("string")).documentElement, "sheet").map((sheet) => attr(sheet, "name"))
+		: [];
+	const sections = await Promise.all(sheetFiles.map(async (sheetFile, sheetIndex) => {
+		const xml = await zip.file(sheetFile)?.async("string");
+		if (!xml) return "";
+		const cells = descendantsByName(parseXml(xml).documentElement, "c");
+		const values = new Map();
+		let maxRow = 1;
+		let maxColumn = 1;
+		cells.forEach((cell, index) => {
+			const position = spreadsheetPosition(attr(cell, "r"), index);
+			if (position.row > 30 || position.column > 12) return;
+			values.set(`${position.row}:${position.column}`, spreadsheetCellValue(cell, sharedStrings));
+			maxRow = Math.max(maxRow, position.row);
+			maxColumn = Math.max(maxColumn, position.column);
+		});
+		const header = Array.from({ length: maxColumn }, (_, index) => `<th>${escapeHtml(values.get(`1:${index + 1}`) || `Column ${index + 1}`)}</th>`).join("");
+		const rows = Array.from({ length: Math.max(0, maxRow - 1) }, (_, rowIndex) => `<tr>${Array.from({ length: maxColumn }, (_, columnIndex) => `<td>${escapeHtml(values.get(`${rowIndex + 2}:${columnIndex + 1}`) || "")}</td>`).join("")}</tr>`).join("");
+		return `<section class="sheet"><h2>${escapeHtml(sheetNames[sheetIndex] || `Sheet ${sheetIndex + 1}`)}</h2><div class="sheet-scroll"><table><thead><tr>${header}</tr></thead><tbody>${rows}</tbody></table></div></section>`;
+	}));
+	const body = `<section class="workbook-summary"><h1>${escapeHtml(title)}</h1><p>${sheetFiles.length} worksheet${sheetFiles.length === 1 ? "" : "s"}. The preview shows up to four sheets, thirty rows, and twelve columns per sheet. Download the workbook for formulas, formatting, filters, and complete data.</p></section>${sections.join("") || "<p>No worksheet data was available for preview.</p>"}`;
+	const html = documentHtml(`${title} — Spreadsheet Preview`, body, "Browser spreadsheet preview. The downloadable XLSX remains the authoritative workbook.")
+		.replace("</style>", ".workbook-summary,.sheet{font-family:system-ui,sans-serif}.workbook-summary{background:#f8fafc;border:1px solid #cbd5e1;border-radius:10px;padding:1rem 1.2rem;margin-bottom:1.4rem}.workbook-summary h1{text-align:left;margin:.1rem 0 .5rem}.sheet{margin:1.25rem 0 2rem}.sheet-scroll{overflow:auto;border:1px solid #cbd5e1;border-radius:8px;background:#fff}.sheet table{min-width:680px;margin:0;font-family:system-ui,sans-serif;font-size:.9rem}.sheet th{background:#1f4e78;color:#fff}.sheet td,.sheet th{white-space:pre-wrap;min-width:100px}</style>");
+	return { title, kind: "xlsx", markup: artifactBlock(`${slug(title)}-xlsx-preview`, `${title} — Spreadsheet Preview`, html) };
+}
+
+async function pptxPreview(filename, bytes) {
+	const title = displayTitle(filename);
+	const zip = await JSZip.loadAsync(bytes, { checkCRC32: true });
+	const slideFiles = Object.keys(zip.files)
+		.filter((name) => /^ppt\/slides\/slide\d+\.xml$/i.test(name))
+		.sort((left, right) => Number(/slide(\d+)/i.exec(left)?.[1]) - Number(/slide(\d+)/i.exec(right)?.[1]))
+		.slice(0, 25);
+	const slides = await Promise.all(slideFiles.map(async (slideFile, index) => {
+		const xml = await zip.file(slideFile)?.async("string");
+		if (!xml) return "";
+		const text = descendantsByName(parseXml(xml).documentElement, "t").map(nodeText).map((value) => value.trim()).filter(Boolean);
+		const heading = text.shift() || `Slide ${index + 1}`;
+		const bullets = text.slice(0, 10).map((value) => `<li>${escapeHtml(value)}</li>`).join("");
+		return `<article class="slide"><div class="slide-number">${index + 1}</div><h2>${escapeHtml(heading)}</h2>${bullets ? `<ul>${bullets}</ul>` : "<p>No extractable slide text was available.</p>"}<footer>paralegal.lk</footer></article>`;
+	}));
+	const body = `<section class="deck-summary"><h1>${escapeHtml(title)}</h1><p>${slideFiles.length} slide${slideFiles.length === 1 ? "" : "s"}. This browser gallery extracts slide text for inspection; download the native PowerPoint for editable objects, notes, animations, and final presentation view.</p></section><section class="slide-gallery">${slides.join("") || "<p>No slides were available for preview.</p>"}</section>`;
+	const html = documentHtml(`${title} — Slide Preview`, body, "Browser slide gallery. The downloadable PPTX remains the authoritative presentation.")
+		.replace("</style>", ".deck-summary,.slide{font-family:system-ui,sans-serif}.deck-summary{background:#f8fafc;border:1px solid #cbd5e1;border-radius:10px;padding:1rem 1.2rem;margin-bottom:1.4rem}.deck-summary h1{text-align:left;margin:.1rem 0 .5rem}.slide-gallery{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:1rem}.slide{position:relative;min-height:185px;aspect-ratio:16/9;overflow:hidden;border:1px solid #cbd5e1;border-radius:8px;padding:1.1rem 1.2rem;background:#f8fafc;box-shadow:0 2px 7px rgba(15,23,42,.08)}.slide:before{content:\"\";position:absolute;top:0;left:0;right:0;height:6px;background:#247ba0}.slide h2{font-family:system-ui,sans-serif;border:0;font-size:1.05rem;margin:.25rem 1.3rem .65rem 0}.slide ul{font-size:.79rem;margin:.25rem 0;padding-left:1rem;line-height:1.35}.slide footer{position:absolute;bottom:.7rem;right:.9rem;color:#64748b;font-size:.65rem}.slide-number{position:absolute;top:.7rem;right:.85rem;color:#64748b;font-size:.75rem;font-weight:700}</style>");
+	return { title, kind: "pptx", markup: artifactBlock(`${slug(title)}-pptx-preview`, `${title} — Slide Preview`, html) };
+}
+
 export async function preparePreview(filename, title) {
 	const extension = path.extname(filename).toLowerCase();
 	const bytes = await readFile(filename);
@@ -160,7 +244,9 @@ export async function preparePreview(filename, title) {
 	if ([".txt", ".json"].includes(extension)) return { title: visibleTitle, kind: "text", markup: markdownArtifactBlock(`${slug(visibleTitle)}-text`, visibleTitle, `\`\`\`text\n${bytes.toString("utf8").slice(0, MAX_PREVIEW_CHARS)}\n\`\`\``) };
 	if (extension === ".docx") return docxPreview(filename, bytes);
 	if (extension === ".pdf") return pdfPreview(filename, bytes);
-	throw new Error(`${path.basename(filename)} cannot be previewed; supported formats are DOCX, PDF, Markdown, text, and JSON`);
+	if (extension === ".xlsx") return xlsxPreview(filename, bytes);
+	if (extension === ".pptx") return pptxPreview(filename, bytes);
+	throw new Error(`${path.basename(filename)} cannot be previewed; supported formats are DOCX, PDF, PPTX, XLSX, Markdown, text, and JSON`);
 }
 
 export { artifactBlock, markdownArtifactBlock };

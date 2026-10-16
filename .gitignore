@@ -17,8 +17,15 @@ packages/ai/src/providers/.model-generation-*/
 junior-silva/artifacts/
 junior-silva/uploads/
 junior-silva/sessions/
+junior-silva/workspace/
 junior-silva/audit/
 junior-silva/node_modules/
+junior-silva/pi-agent/
+junior-silva/test-data/
+
+# Local test artifacts created outside the mounted Junior Silva workspace.
+workspace/
+tmp/
 
 # Editor files
 .vscode/
@@ -48,3 +55,5 @@ plans/
 .pi/hf-sessions-backup/
 collect.sh
 packages/agent/docs/extensions/pi-server-artifact/index.md
+__pycache__/
+*.py[cod]

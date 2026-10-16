@@ -3,10 +3,13 @@ import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { artifactsRoot, env, projectRoot, requiredEnv, uploadsRoot } from "../core/environment.mjs";
+import { pathToFileURL } from "node:url";
+import { artifactsRoot, env, projectRoot, requiredEnv, uploadsRoot, workspaceRoot } from "../core/environment.mjs";
 import { mimeType, resolveArtifactRequest, safeFilename } from "../core/files.mjs";
+import { dispatchMcpRequest } from "../mcp/server.mjs";
+import { addAssistantUsage, createUsageTotals, openAiUsage, requestsStreamUsage } from "./usage.mjs";
 
 const PORT = Number(env("JUNIOR_SILVA_PORT", "8126"));
 const HOST = env("JUNIOR_SILVA_BIND_HOST", "127.0.0.1");
@@ -18,6 +21,7 @@ const SESSION_ROOT = path.join(path.dirname(artifactsRoot), "sessions");
 const AGENT_ROOT = path.resolve(env("PI_CODING_AGENT_DIR", path.join(path.dirname(artifactsRoot), "pi-agent")));
 const PI_CLI = path.join(projectRoot, "packages", "coding-agent", "dist", "bundle", "cli.js");
 const ATTACHMENT_ORIGINS = new Set(env("JUNIOR_SILVA_ATTACHMENT_ORIGINS").split(",").map((item) => item.trim()).filter(Boolean));
+const auditRoot = path.join(path.dirname(artifactsRoot), "audit");
 
 function json(res, status, value) {
 	const body = JSON.stringify(value);
@@ -141,21 +145,136 @@ async function saveUploads(key, candidates, extracted) {
 	return paths;
 }
 
+async function conversationUploadPaths(key) {
+	const directory = path.join(uploadsRoot, key);
+	try {
+		const entries = await readdir(directory, { withFileTypes: true });
+		return entries.filter((entry) => entry.isFile()).map((entry) => path.join(directory, entry.name)).sort();
+	} catch (caught) {
+		if (caught && typeof caught === "object" && "code" in caught && caught.code === "ENOENT") return [];
+		throw caught;
+	}
+}
+
 function piPrompt(instruction, files) {
 	if (!files.length) return instruction;
 	return `The user supplied these local document files with this request:\n${files.map((item) => `- ${item}`).join("\n")}\n\nUser request:\n${instruction || "Examine the supplied legal documents and respond appropriately."}`;
 }
 
-function progressName(toolName) {
-	return ({ reviewer_perera_start_review: "Reviewer Perera is reading the supplied document set…", reviewer_perera_continue_review: "Reviewer Perera is applying the user's answers…", reviewer_perera_get_findings: "Retrieving Reviewer Perera's clause findings…", rag_chat_research: "Researching Sri Lankan legal authorities and linked citations…", drafter_weeramantry_draft_or_revise: "Drafter Weeramantry is preparing the legal document…", translator_siriwardena_translate_document: "Translator Siriwardena is translating the document…", translator_siriwardena_translate_text: "Translator Siriwardena is translating the supplied text…", librechat_prepare_document_preview: "Preparing a local document preview…" })[toolName] || `Using ${toolName || "a specialist tool"}…`;
+const safeToolProgress = Object.freeze({
+	review_prepare_document_set: "Reviewing the supplied legal document set…",
+	review_finalize_document: "Preparing the annotated legal review…",
+	legal_precedent_search: "Consulting drafting structure…",
+	legal_precedent_read: "Reviewing a drafting pattern…",
+	legal_validate_draft: "Checking the legal draft for completeness…",
+	rag_chat_research: "Researching Sri Lankan legal authorities and linked citations…",
+	legal_source_retrieve_details: "Retrieving an underlying Sri Lankan legal source…",
+	web_search_public_legal_sources: "Checking current public legal sources…",
+	translator_siriwardena_translate_document: "Translator Siriwardena is translating the document…",
+	translator_siriwardena_translate_text: "Translator Siriwardena is translating the supplied text…",
+	code_runner_data_transform: "Performing a legal calculation or structured analysis…",
+	workbench_publish_artifact: "Publishing the completed legal file for download…",
+	librechat_prepare_document_preview: "Preparing a local document preview…",
+});
+
+export function safeProgressName(toolName) {
+	const raw = String(toolName || "");
+	const normalized = Object.keys(safeToolProgress).find((name) => raw === name || raw.endsWith(`__${name}`)) || raw;
+	if (safeToolProgress[normalized]) return safeToolProgress[normalized];
+	if (/^(bash|shell|terminal|exec|run_command)$/i.test(normalized)) return "Preparing the requested legal work product…";
+	if (/^(read|read_file|list|find|glob|grep|search_files)$/i.test(normalized)) return "Reviewing supplied legal material…";
+	if (/^(write|edit|create_file|apply_patch)$/i.test(normalized)) return "Preparing the requested legal work product…";
+	if (/skill/i.test(normalized)) return "Applying a relevant legal work skill…";
+	return "Using a legal work tool…";
+}
+
+function safeAuditToolName(toolName) {
+	const raw = String(toolName || "unknown");
+	return Object.keys(safeToolProgress).find((name) => raw === name || raw.endsWith(`__${name}`)) ||
+		(/^(bash|shell|terminal|exec|run_command)$/i.test(raw) ? "builtin_command" :
+			/^(read|read_file|list|find|glob|grep|search_files)$/i.test(raw) ? "builtin_read" :
+			/^(write|edit|create_file|apply_patch)$/i.test(raw) ? "builtin_write" : "builtin_or_unrecognized");
+}
+
+function agentEnvironment() {
+	const output = {
+		PATH: process.env.PATH || "",
+		HOME: process.env.HOME || "",
+		LANG: process.env.LANG || "C.UTF-8",
+		TERM: process.env.TERM || "xterm-256color",
+		TZ: "Asia/Colombo",
+		PI_CODING_AGENT_SESSION_DIR: SESSION_ROOT,
+		PI_CODING_AGENT_DIR: AGENT_ROOT,
+		PI_SKIP_VERSION_CHECK: "1",
+		JUNIOR_SILVA_MCP_GATEWAY_URL: `http://127.0.0.1:${PORT}/internal/mcp`,
+		JUNIOR_SILVA_DATA_ROOT: path.dirname(artifactsRoot),
+		JUNIOR_SILVA_ARTIFACT_ROOT: artifactsRoot,
+		JUNIOR_SILVA_UPLOAD_ROOT: uploadsRoot,
+		JUNIOR_SILVA_WORKSPACE_ROOT: workspaceRoot,
+	};
+	const provider = env("PI_PROVIDER", "google");
+	if (provider === "anthropic" && process.env.ANTHROPIC_API_KEY) output.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+	if (provider === "google" && process.env.GEMINI_API_KEY) output.GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+	return output;
+}
+
+function loopback(req) {
+	return ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(String(req.socket.remoteAddress || ""));
+}
+
+async function audit(sessionId, event) {
+	await mkdir(auditRoot, { recursive: true });
+	const line = JSON.stringify({ at: new Date().toISOString(), sessionId, ...event });
+	await appendFile(path.join(auditRoot, `${sessionId}.jsonl`), `${line}\n`, "utf8");
+}
+
+async function sessionFileSizes() {
+	const sizes = new Map();
+	try {
+		const entries = await readdir(SESSION_ROOT, { withFileTypes: true });
+		for (const entry of entries) {
+			if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+			const file = path.join(SESSION_ROOT, entry.name);
+			sizes.set(file, (await stat(file)).size);
+		}
+	} catch (caught) {
+		if (caught?.code !== "ENOENT") throw caught;
+	}
+	return sizes;
+}
+
+async function appendedSessionUsage(sizesBefore) {
+	const totals = createUsageTotals();
+	let changedFiles = 0;
+	try {
+		const entries = await readdir(SESSION_ROOT, { withFileTypes: true });
+		for (const entry of entries) {
+			if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+			const file = path.join(SESSION_ROOT, entry.name);
+			const offset = sizesBefore.get(file) || 0;
+			if ((await stat(file)).size <= offset) continue;
+			changedFiles += 1;
+			const contents = await readFile(file);
+			for (const line of contents.subarray(offset).toString("utf8").split(/\r?\n/)) {
+				if (!line.trim()) continue;
+				try {
+					const event = JSON.parse(line);
+					if (event.type === "message" && event.message?.role === "assistant") addAssistantUsage(totals, event.message.usage);
+				} catch { }
+			}
+		}
+	} catch (caught) {
+		if (caught?.code !== "ENOENT") throw caught;
+	}
+	return changedFiles === 1 ? totals : undefined;
 }
 
 async function runPi(prompt, sessionId, onProgress) {
-	// The hosted surface exposes the legal MCP tools, never Pi's shell/edit tools.
-	// Full Pi remains available through the Windows and Docker CLI launchers.
+	// Hosted Pi uses administrator-owned legal MCP registration. Its normal built-in
+	// tools remain subject to the legal-scope extension and deployment sandbox.
 	const args = [
 		PI_CLI,
-		"--mode", "json", "--no-builtin-tools", "--session-id", sessionId,
+		"--mode", "json", "--approve", "--session-id", sessionId,
 		// Project extensions are explicit so the hosted endpoint behaves exactly
 		// like the local CLI, even when Pi's discovery configuration changes.
 		"--extension", path.join(projectRoot, ".pi", "extensions", "junior-silva-legal-context.ts"),
@@ -167,11 +286,22 @@ async function runPi(prompt, sessionId, onProgress) {
 	if (env("PI_THINKING")) args.push("--thinking", env("PI_THINKING"));
 	args.push(prompt);
 	await mkdir(SESSION_ROOT, { recursive: true });
+	const sessionSizesBefore = await sessionFileSizes();
+	const startedAt = Date.now();
 	return new Promise((resolve, reject) => {
-		const child = spawn(process.execPath, args, { cwd: projectRoot, env: { ...process.env, PI_CODING_AGENT_SESSION_DIR: SESSION_ROOT, PI_SKIP_VERSION_CHECK: "1" }, stdio: ["ignore", "pipe", "pipe"] });
+		const child = spawn(process.execPath, args, { cwd: projectRoot, env: agentEnvironment(), stdio: ["ignore", "pipe", "pipe"] });
 		let buffer = "";
 		let stderr = "";
 		let finalText = "";
+		const usageTotals = createUsageTotals();
+		const usageResponseIds = new Set();
+		const recordAssistantUsage = (message) => {
+			if (!message?.usage) return;
+			const key = message.responseId || `${message.timestamp || ""}:${message.usage.totalTokens || ""}:${message.usage.input || ""}:${message.usage.output || ""}`;
+			if (usageResponseIds.has(key)) return;
+			usageResponseIds.add(key);
+			addAssistantUsage(usageTotals, message.usage);
+		};
 		child.stdout.on("data", (chunk) => {
 			buffer += chunk.toString();
 			const lines = buffer.split(/\r?\n/);
@@ -179,15 +309,28 @@ async function runPi(prompt, sessionId, onProgress) {
 			for (const line of lines) {
 				try {
 					const event = JSON.parse(line);
-					if (event.type === "message_end" && event.message?.role === "custom" && event.message?.customType === "junior-silva-scope" && typeof event.message?.content === "string") finalText = event.message.content;
-					if (event.type === "agent_start") onProgress("Pi is planning the requested work…");
-					if (event.type === "tool_execution_start") onProgress(progressName(event.toolName || event.tool_name));
-					if (event.type === "tool_execution_update") {
-						const message = event.partialResult?.details?.progress || event.partial_result?.details?.progress || event.partialResult?.content?.find?.((part) => part.type === "text")?.text;
-						if (typeof message === "string" && message.trim()) onProgress(message.trim().slice(0, 500));
+					if (event.type === "message_update" && event.assistantMessageEvent?.type === "message_end") {
+						recordAssistantUsage({ ...event.assistantMessageEvent.message, usage: event.usage });
 					}
-					if (event.type === "tool_execution_end" && event.isError) onProgress("A specialist tool reported a problem; Pi is deciding the next safe step…");
-					if (event.type === "message_end" && event.message?.role === "assistant") finalText = (event.message.content || []).filter((part) => part.type === "text").map((part) => part.text || "").join("\n");
+					if (event.type === "message_end" && event.message?.role === "custom" && event.message?.customType === "junior-silva-scope" && typeof event.message?.content === "string") finalText = event.message.content;
+					if (event.type === "agent_start") onProgress("Pi is planning the requested legal work…");
+					if (event.type === "tool_execution_start") {
+						const tool = event.toolName || event.tool_name;
+						onProgress(safeProgressName(tool));
+						void audit(sessionId, { type: "tool", tool: safeAuditToolName(tool), status: "started" }).catch(() => {});
+					}
+					// Never relay update payloads: built-in tools can include shell output,
+					// files, URLs, source text, credentials, or internal service responses.
+					if (event.type === "tool_execution_end") {
+						const tool = event.toolName || event.tool_name;
+						void audit(sessionId, { type: "tool", tool: safeAuditToolName(tool), status: event.isError ? "error" : "completed" }).catch(() => {});
+						if (event.isError) onProgress("A specialist tool reported a problem; Pi is deciding the next safe step…");
+					}
+					if (event.type === "message" && event.message?.role === "assistant") recordAssistantUsage(event.message);
+					if (event.type === "message_end" && event.message?.role === "assistant") {
+						finalText = (event.message.content || []).filter((part) => part.type === "text").map((part) => part.text || "").join("\n");
+						recordAssistantUsage(event.message);
+					}
 				} catch { }
 			}
 		});
@@ -198,7 +341,9 @@ async function runPi(prompt, sessionId, onProgress) {
 			clearTimeout(timeout);
 			if (code !== 0) return reject(new Error(`Pi exited with code ${code}: ${stderr.replace(/\s+/g, " ").slice(0, 1200)}`));
 			if (!finalText.trim()) return reject(new Error("Pi returned no final answer"));
-			resolve(finalText.trim());
+			void appendedSessionUsage(sessionSizesBefore).then((persistedUsage) => {
+				resolve({ answer: finalText.trim(), usage: openAiUsage(persistedUsage) || openAiUsage(usageTotals), elapsedMs: Date.now() - startedAt });
+			}).catch(reject);
 		});
 	});
 }
@@ -221,9 +366,10 @@ function streamDelta(res, id, field, value) {
 	res.write(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: MODEL, choices: [{ index: 0, delta: { [field]: value }, finish_reason: null }] })}\n\n`);
 }
 
-function finishStream(res, id, answer) {
+function finishStream(res, id, answer, usage) {
 	for (let offset = 0; offset < answer.length; offset += 1200) streamDelta(res, id, "content", answer.slice(offset, offset + 1200));
 	res.write(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: MODEL, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`);
+	if (usage) res.write(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: MODEL, choices: [], usage })}\n\n`);
 	res.end("data: [DONE]\n\n");
 }
 
@@ -237,18 +383,19 @@ async function serveArtifact(res, pathname) {
 	res.end(bytes);
 }
 
-await Promise.all([mkdir(artifactsRoot, { recursive: true }), mkdir(uploadsRoot, { recursive: true }), mkdir(SESSION_ROOT, { recursive: true }), mkdir(AGENT_ROOT, { recursive: true })]);
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+await Promise.all([mkdir(artifactsRoot, { recursive: true }), mkdir(uploadsRoot, { recursive: true }), mkdir(workspaceRoot, { recursive: true }), mkdir(SESSION_ROOT, { recursive: true }), mkdir(AGENT_ROOT, { recursive: true }), mkdir(auditRoot, { recursive: true })]);
 // Hosted mode uses an administrator-owned global MCP registration. It does not
 // bypass Pi's project-trust prompt or approve arbitrary project-local code.
 await writeFile(path.join(AGENT_ROOT, "mcp.json"), `${JSON.stringify({
 	mcpServers: {
 		"junior-silva-legal": {
 			command: process.execPath,
-			args: [path.join(projectRoot, "junior-silva", "mcp", "server.mjs")],
+			args: [path.join(projectRoot, "junior-silva", "mcp", "launcher.mjs")],
 			cwd: projectRoot,
 			exposure: "direct",
 			timeout: 1200,
-			description: "Independent legal research, interactive review, drafting, and translation tools.",
+			description: "Independent Sri Lankan legal research, native source-anchored review, native drafting, and translation tools.",
 		},
 	},
 }, null, 2)}\n`, "utf8");
@@ -259,6 +406,13 @@ const server = createServer(async (req, res) => {
 		if (req.method === "GET" && url.pathname === "/health") return json(res, 200, { status: "ok", service: MODEL, pi: "1.0.0" });
 		if (req.method === "GET" && url.pathname === "/ready") return json(res, 200, { ready: existsSync(PI_CLI), mcp: existsSync(path.join(projectRoot, ".pi", "mcp.json")) });
 		if (req.method === "GET" && url.pathname.startsWith("/files/")) return serveArtifact(res, url.pathname);
+		if (req.method === "POST" && url.pathname === "/internal/mcp") {
+			if (!loopback(req)) return json(res, 403, { error: "Local gateway only" });
+			const message = await requestBody(req);
+			const response = await dispatchMcpRequest(message);
+			if (!response) return json(res, 202, {});
+			return json(res, 200, response);
+		}
 		if (url.pathname.startsWith("/v1/") && !authorized(req)) return json(res, 401, { error: { message: "Unauthorized", type: "authentication_error" } });
 		if (req.method === "GET" && url.pathname === "/v1/models") return json(res, 200, { object: "list", data: [{ id: MODEL, object: "model", created: 0, owned_by: "paralegal.lk" }] });
 		if (req.method === "POST" && url.pathname === "/v1/chat/completions") {
@@ -268,14 +422,16 @@ const server = createServer(async (req, res) => {
 			const candidates = fileCandidates(body);
 			if (!uploadText.instruction && !uploadText.files.length && !candidates.length) return json(res, 400, { error: { message: "A user message or document is required", type: "invalid_request_error" } });
 			const key = conversationKey(req, body);
-			const files = await saveUploads(key, candidates, uploadText.files);
+			await saveUploads(key, candidates, uploadText.files);
+			const files = await conversationUploadPaths(key);
 			const id = `chatcmpl-${randomUUID()}`;
 			const streaming = body.stream !== false;
+			const includeStreamUsage = requestsStreamUsage(body);
 			if (streaming) { startStream(res, id); heartbeat = setInterval(() => res.write(": keep-alive\n\n"), 15_000); }
-			const answer = await serial(key, () => runPi(piPrompt(uploadText.instruction, files), `junior-silva-v2-${key}`, (message) => { if (streaming) streamDelta(res, id, "reasoning_content", `${message}\n`); }));
+			const result = await serial(key, () => runPi(piPrompt(uploadText.instruction, files), `junior-silva-v2-${key}`, (message) => { if (streaming) streamDelta(res, id, "reasoning_content", `${message}\n`); }));
 			if (heartbeat) clearInterval(heartbeat);
-			if (streaming) return finishStream(res, id, answer);
-			return json(res, 200, { id, object: "chat.completion", created: Math.floor(Date.now() / 1000), model: MODEL, choices: [{ index: 0, message: { role: "assistant", content: answer }, finish_reason: "stop" }] });
+			if (streaming) return finishStream(res, id, result.answer, includeStreamUsage ? result.usage : undefined);
+			return json(res, 200, { id, object: "chat.completion", created: Math.floor(Date.now() / 1000), model: MODEL, choices: [{ index: 0, message: { role: "assistant", content: result.answer }, finish_reason: "stop" }], ...(result.usage ? { usage: result.usage } : {}) });
 		}
 		return json(res, 404, { error: { message: "Not found", type: "invalid_request_error" } });
 	} catch (error) {
@@ -289,5 +445,6 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => console.log(`[junior-silva-v2] listening on ${HOST}:${PORT}`));
+}
 
 export { fileCandidates, messageText, splitTextEnvelope, textUploads };

@@ -13,20 +13,27 @@ services:
       JUNIOR_SILVA_DATA_ROOT: /data
       JUNIOR_SILVA_ARTIFACT_ROOT: /data/artifacts
       JUNIOR_SILVA_UPLOAD_ROOT: /data/uploads
+
+      JUNIOR_SILVA_WORKSPACE_ROOT: /data/workspace
       PI_CODING_AGENT_DIR: /data/pi-agent
       PI_CODING_AGENT_SESSION_DIR: /data/sessions
       REVIEWER_BASE_URL: http://reviewer_agent_v2_pi_api:8124
       RAG_BASE_URL: http://rag-chat-server-legal-search-api-1:8123
       DRAFTER_BASE_URL: http://drafter-weeramantry:8033
       TRANSLATOR_BASE_URL: ${TRANSLATOR_BASE_URL:-https://www.devtranslate.paralegal.lk/api}
+
+      JUNIOR_SILVA_KB_ROOT: /kb
     ports:
       - "127.0.0.1:8132:8126"
     volumes:
       - junior_silva_v2_data:/data
       - ./junior-silva/artifacts:/data/artifacts
       - ./junior-silva/uploads:/data/uploads
+
+      - ./junior-silva/workspace:/data/workspace
       - ./junior-silva/sessions:/data/sessions
       - ./junior-silva/pi-agent:/data/pi-agent
+      - ${JUNIOR_SILVA_KB_HOST_PATH:-./junior-silva/empty-kb}:/kb:ro
     networks:
       - librechat
       - rag
@@ -42,12 +49,15 @@ services:
       JUNIOR_SILVA_DATA_ROOT: /data
       JUNIOR_SILVA_ARTIFACT_ROOT: /data/artifacts
       JUNIOR_SILVA_UPLOAD_ROOT: /data/uploads
+
+      JUNIOR_SILVA_WORKSPACE_ROOT: /data/workspace
       PI_CODING_AGENT_DIR: /data/pi-agent
       PI_CODING_AGENT_SESSION_DIR: /data/sessions
       REVIEWER_BASE_URL: http://reviewer_agent_v2_pi_api:8124
       RAG_BASE_URL: http://rag-chat-server-legal-search-api-1:8123
       DRAFTER_BASE_URL: http://drafter-weeramantry:8033
       TRANSLATOR_BASE_URL: ${TRANSLATOR_BASE_URL:-https://www.devtranslate.paralegal.lk/api}
+      JUNIOR_SILVA_KB_ROOT: /kb
     command: ["node", "junior-silva/cli/docker-cli.mjs"]
     stdin_open: true
     tty: true
@@ -55,8 +65,11 @@ services:
       - junior_silva_v2_data:/data
       - ./junior-silva/artifacts:/data/artifacts
       - ./junior-silva/uploads:/data/uploads
+
+      - ./junior-silva/workspace:/data/workspace
       - ./junior-silva/sessions:/data/sessions
       - ./junior-silva/pi-agent:/data/pi-agent
+      - ${JUNIOR_SILVA_KB_HOST_PATH:-./junior-silva/empty-kb}:/kb:ro
     networks:
       - librechat
       - rag
