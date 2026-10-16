@@ -268,7 +268,7 @@ Before committing, check staged files for secrets or generated user data:
 
 ~~~powershell
 $blocked = git diff --cached --name-only | Where-Object {
-  $_ -match '(^|/)\.env$|\.pem$|\.key$|credentials|sessions|uploads|artifacts'
+  $_ -match '(^|/)\.env($|\.)|(^|/)[^/]+\.(pem|key)$|(^|/)credentials(\.[^/]+)?$|(^|/)(sessions?|uploads?|artifacts?)/.*\.(jsonl|log|zip|pdf|docx|xlsx|pptx)$'
 }
 if ($blocked) {
   throw "Possible secret or generated file staged."
