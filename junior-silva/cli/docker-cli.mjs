@@ -7,6 +7,7 @@ const cli = path.join(projectRoot, "packages", "coding-agent", "dist", "bundle",
 const args = [
 	cli, "--tui-mode", "regular", "--approve",
 	"--extension", path.join(projectRoot, ".pi", "extensions", "junior-silva-legal-context.ts"),
+	"--extension", path.join(projectRoot, ".pi", "extensions", "junior-silva-scope-guard.ts"),
 	"--extension", path.join(projectRoot, ".pi", "extensions", "legal-research-citation-delivery.ts"),
 	"--extension", path.join(projectRoot, ".pi", "extensions", "librechat-preview-delivery.ts"),
 ];

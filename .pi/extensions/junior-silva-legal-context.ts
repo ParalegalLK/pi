@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { findSensitiveUserRequest, toolSafetyReason } from "../../junior-silva/core/legal-scope.mjs";
 
-const REFUSAL = "I can help only with Sri Lankan legal work, such as legal research, document review, drafting, translation, or a legal work product. How can I assist with your Sri Lankan legal matter?";
 const GREETING = "Hello! I’m Junior Silva from paralegal.lk—how can I help you with your Sri Lankan legal work today?";
 
 function currentColomboTime() {
@@ -18,14 +18,6 @@ function isGreeting(text: string) {
 	return /^(?:hi|hello|hey|good\s+(?:morning|afternoon|evening))\s*[!.?]*$/i.test(text.trim());
 }
 
-function isClearlyLegal(text: string) {
-	return /\b(?:legal|law|laws|lawful|court|case|judge|judgment|judgement|act|acts|gazette|constitution|constitutional|contract|agreement|lease|deed|affidavit|pleading|claim|dispute|litigation|arbitration|mediation|employment|labou?r|tax|company|commercial|criminal|civil|property|inherit(?:ance)?|divorce|marriage|sri\s*lanka|lankan|attorney|lawyer|client|legal notice|legal opinion|legal research|review (?:this|the|my)|translate (?:this|the|my))\b/i.test(text);
-}
-
-function isClearlyNonLegal(text: string) {
-	return /\b(?:html|css|javascript|typescript|python|react|website|web\s*app|mobile\s*app|software|algorithm|debug|program(?:ming)?|code|t-?shirt|poem|song|recipe|game|fiction|travel itinerary)\b/i.test(text) && !isClearlyLegal(text);
-}
-
 export default function juniorSilvaLegalContext(pi: ExtensionAPI) {
 	pi.on("before_agent_start", (event) => ({
 		systemPrompt: `${event.systemPrompt}\n\n## Native legal review and drafting\nFor a document-review request, read the sri-lankan-legal-review skill and call review_prepare_document_set with every related primary and supporting file. It prepares evidence; it never asks questions itself. Read its packet before deciding whether a focused factual question is genuinely necessary. Never silently assume a material fact that the document relies on. For substantive reviews, the returned context has a mandatory user-controlled evidence checkpoint. Ask the user naturally whether they have further agreements, correspondence, policies, notices, asset records, or evidence; they may upload it, answer, say “review normally”, or say “skip”. Do not record a checkpoint outcome in the same turn as preparation. After an actual later user response, call review_record_checkpoint_outcome. If the response contains a document, rerun review_prepare_document_set using the full combined document set instead. Only then finalise. The tools waive this checkpoint only when the user expressly requested immediate or chat-only review. Once you have source-grounded findings and the checkpoint is resolved, call review_finalize_document. Unless the user explicitly requested chat-only analysis, do not say the review is complete until review_finalize_document returns both Reviewed_document.docx and legal-review.md with verified annotation coverage. Never delegate the review to Reviewer Perera.\n\nFor Sri Lankan legal research, use RAG Chat for normal authority selection, synthesis and citation-linked answers. If a RAG-cited authority needs deeper source detail to answer accurately, use legal_source_retrieve_details with only the required source and fields; it is evidence retrieval, not a replacement for RAG, and it cannot establish unreturned amendment history.\n\nFor a substantial legal instrument, revision, pleading, affidavit, legal opinion, notice, or formal document, read the sri-lankan-legal-drafting skill. Use private precedent tools only for structure, Sri Lankan RAG for legal authority, and native draft validation before delivery. Do not delegate drafting to Drafter Weeramantry.`,
@@ -40,11 +32,17 @@ export default function juniorSilvaLegalContext(pi: ExtensionAPI) {
 			pi.sendMessage({ customType: "junior-silva-scope", content: GREETING, display: true });
 			return { action: "handled" };
 		}
-		if (isClearlyNonLegal(event.text)) {
-			pi.sendMessage({ customType: "junior-silva-scope", content: REFUSAL, display: true });
+		const sensitiveReason = findSensitiveUserRequest(event.text);
+		if (sensitiveReason) {
+			pi.sendMessage({ customType: "junior-silva-scope", content: sensitiveReason, display: true });
 			return { action: "handled" };
 		}
 		return { action: "continue" };
+	});
+
+	pi.on("tool_call", (event) => {
+		const reason = toolSafetyReason(event.toolName, event.input);
+		return reason ? { block: true, reason } : undefined;
 	});
 
 	pi.on("before_agent_start", (event) => ({
