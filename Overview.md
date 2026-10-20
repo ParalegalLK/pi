@@ -44,6 +44,9 @@ LibreChat custom endpoint│ legal scope + chronology extension      │
 | Entry point | Purpose |
 | --- | --- |
 | Start-JuniorSilvaV2.ps1 | Windows launcher for interactive Pi/TUI use. |
+| Start-JuniorSilvaV2.sh | Linux/WSL launcher for interactive Pi/TUI use. |
+| Setup-JuniorSilvaV2.ps1 / setup-junior-silva-v2.sh | Fresh-clone setup, validation and optional Docker startup. |
+| LOCAL_CLI_SETUP.md | Step-by-step Windows, Linux/WSL and Docker local CLI guide. |
 | junior-silva/cli/docker-cli.mjs | Starts the same Pi configuration in the optional Docker CLI profile. |
 | junior-silva/server/openai.mjs | OpenAI-compatible HTTP/SSE endpoint used by LibreChat. |
 | junior-silva/mcp/server.mjs | Standards-compliant stdio MCP server exposing specialist tools. |
@@ -119,6 +122,10 @@ pi/
 ├── Dockerfile                               Pi build plus V2 runtime image
 ├── docker-compose.yml                       HTTP service and optional interactive CLI profile
 ├── Start-JuniorSilvaV2.ps1                  Windows Pi launcher
+├── Start-JuniorSilvaV2.sh                   Linux/WSL Pi launcher
+├── Setup-JuniorSilvaV2.ps1                  Windows setup and optional Docker runner
+├── setup-junior-silva-v2.sh                 Linux/WSL setup and optional Docker runner
+├── LOCAL_CLI_SETUP.md                       Fresh-clone local CLI guide
 ├── TESTING.md                               focused-first acceptance and regression checklist
 ├── Overview.md                              this operational handover
 └── History.md                               chronological implementation record

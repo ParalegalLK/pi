@@ -278,6 +278,7 @@ async function runPi(prompt, sessionId, onProgress) {
 		// Project extensions are explicit so the hosted endpoint behaves exactly
 		// like the local CLI, even when Pi's discovery configuration changes.
 		"--extension", path.join(projectRoot, ".pi", "extensions", "junior-silva-legal-context.ts"),
+		"--extension", path.join(projectRoot, ".pi", "extensions", "junior-silva-scope-guard.ts"),
 		"--extension", path.join(projectRoot, ".pi", "extensions", "legal-research-citation-delivery.ts"),
 		"--extension", path.join(projectRoot, ".pi", "extensions", "librechat-preview-delivery.ts"),
 	];

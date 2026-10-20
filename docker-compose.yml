@@ -17,9 +17,9 @@ services:
       JUNIOR_SILVA_WORKSPACE_ROOT: /data/workspace
       PI_CODING_AGENT_DIR: /data/pi-agent
       PI_CODING_AGENT_SESSION_DIR: /data/sessions
-      REVIEWER_BASE_URL: http://reviewer_agent_v2_pi_api:8124
-      RAG_BASE_URL: http://rag-chat-server-legal-search-api-1:8123
-      DRAFTER_BASE_URL: http://drafter-weeramantry:8033
+      REVIEWER_BASE_URL: ${JUNIOR_SILVA_DOCKER_REVIEWER_BASE_URL:-http://reviewer_agent_v2_pi_api:8124}
+      RAG_BASE_URL: ${JUNIOR_SILVA_DOCKER_RAG_BASE_URL:-http://rag-chat-server-legal-search-api-1:8123}
+      DRAFTER_BASE_URL: ${JUNIOR_SILVA_DOCKER_DRAFTER_BASE_URL:-http://drafter-weeramantry:8033}
       TRANSLATOR_BASE_URL: ${TRANSLATOR_BASE_URL:-https://www.devtranslate.paralegal.lk/api}
 
       JUNIOR_SILVA_KB_ROOT: /kb
@@ -53,9 +53,9 @@ services:
       JUNIOR_SILVA_WORKSPACE_ROOT: /data/workspace
       PI_CODING_AGENT_DIR: /data/pi-agent
       PI_CODING_AGENT_SESSION_DIR: /data/sessions
-      REVIEWER_BASE_URL: http://reviewer_agent_v2_pi_api:8124
-      RAG_BASE_URL: http://rag-chat-server-legal-search-api-1:8123
-      DRAFTER_BASE_URL: http://drafter-weeramantry:8033
+      REVIEWER_BASE_URL: ${JUNIOR_SILVA_DOCKER_REVIEWER_BASE_URL:-http://reviewer_agent_v2_pi_api:8124}
+      RAG_BASE_URL: ${JUNIOR_SILVA_DOCKER_RAG_BASE_URL:-http://rag-chat-server-legal-search-api-1:8123}
+      DRAFTER_BASE_URL: ${JUNIOR_SILVA_DOCKER_DRAFTER_BASE_URL:-http://drafter-weeramantry:8033}
       TRANSLATOR_BASE_URL: ${TRANSLATOR_BASE_URL:-https://www.devtranslate.paralegal.lk/api}
       JUNIOR_SILVA_KB_ROOT: /kb
     command: ["node", "junior-silva/cli/docker-cli.mjs"]
