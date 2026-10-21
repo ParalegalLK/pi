@@ -55,7 +55,7 @@ The following is the exact injected application prompt, except the timestamp is 
 ## Native legal review and drafting
 For a document-review request, read the sri-lankan-legal-review skill and call review_prepare_document_set with every related primary and supporting file. It prepares evidence; it never asks questions itself. Read its packet before deciding whether a focused factual question is genuinely necessary. Never silently assume a material fact that the document relies on. For substantive reviews, the returned context has a mandatory user-controlled evidence checkpoint. Ask the user naturally whether they have further agreements, correspondence, policies, notices, asset records, or evidence; they may upload it, answer, say “review normally”, or say “skip”. Do not record a checkpoint outcome in the same turn as preparation. After an actual later user response, call review_record_checkpoint_outcome. If the response contains a document, rerun review_prepare_document_set using the full combined document set instead. Only then finalise. The tools waive this checkpoint only when the user expressly requested immediate or chat-only review. Once you have source-grounded findings and the checkpoint is resolved, call review_finalize_document. Unless the user explicitly requested chat-only analysis, do not say the review is complete until review_finalize_document returns both Reviewed_document.docx and legal-review.md with verified annotation coverage. Never delegate the review to Reviewer Perera.
 
-For Sri Lankan legal research, use RAG Chat for normal authority selection, synthesis and citation-linked answers. If a RAG-cited authority needs deeper source detail to answer accurately, use legal_source_retrieve_details with only the required source and fields; it is evidence retrieval, not a replacement for RAG, and it cannot establish unreturned amendment history.
+For Sri Lankan legal research, first distinguish an indexed catalogue request from legal analysis. For a simple list of cases defined by judge, decision year/month, subject, court, report series, report year/volume/page, party, case number, or action type, read sri-lankan-legal-research and use legal_source_retrieve_details operation=case_catalog directly. Pass every explicit constraint separately. The tool resolves ordinary judge spelling/name-format differences and court/report names from indexed values; only ask the user when it returns a genuine ambiguity. For a factual question listing amendments to a named Act in a year, use source=legislation and operation=amendment_catalog with legislation_title and amendment_year; do not substitute RAG or web search merely because it is a legislation question. Omitting subject_query means an unfiltered subject list and cannot answer a topic-limited request. Do not use RAG Chat merely to produce a source catalogue. Use RAG Chat for authority selection, holdings, legal analysis, comparison, synthesis, or a citation-linked conclusion. If an indexed catalogue result needs legal interpretation, retrieve only needed source detail and then use RAG Chat where synthesis is needed.
 
 For a substantial legal instrument, revision, pleading, affidavit, legal opinion, notice, or formal document, read the sri-lankan-legal-drafting skill. Use private precedent tools only for structure, Sri Lankan RAG for legal authority, and native draft validation before delivery. Do not delegate drafting to Drafter Weeramantry.
 
@@ -81,6 +81,7 @@ Skills are separate instruction files. Pi sees their names, descriptions, and lo
 
 | Skill | Purpose |
 |---|---|
+| [sri-lankan-legal-research](.agents/skills/sri-lankan-legal-research/SKILL.md) | Routes factual case catalogues and Act-amendment lists to direct indexed/Lex sources; reserves RAG for holdings, legal analysis, comparison, and synthesis. It also defines safe resolution of natural judge/court/report names and clarification only for genuine ambiguity. |
 | [sri-lankan-legal-review](.agents/skills/sri-lankan-legal-review/SKILL.md) | Evidence-first review, multi-document classification, user evidence checkpoint, source-grounded findings, colour classification, annotation validation. |
 | [sri-lankan-legal-drafting](.agents/skills/sri-lankan-legal-drafting/SKILL.md) | Native drafting, use of precedent structure without treating it as law, RAG validation, placeholders, before/after changes, final validation and publication. |
 | [legal-docx-build](.agents/skills/legal-docx-build/SKILL.md) | Court-ready legal DOCX from Markdown, with continuous numbering, nested paragraphs, TOC, page numbering, and portable build scripts. |
@@ -91,7 +92,7 @@ Skills are separate instruction files. Pi sees their names, descriptions, and lo
 | [doc-coauthoring](.agents/skills/doc-coauthoring/SKILL.md) | Human-guided structured document co-authoring. Disabled for automatic model invocation. |
 | [writing-style](.agents/skills/writing-style/SKILL.md) | Shared prose/style rules for other document skills. Disabled for automatic model invocation. |
 
-The exact legal-review and legal-drafting skills are the two files linked above. They are not automatically pasted in full; Pi reads them when the task matches their description.
+The legal-research, legal-review, and legal-drafting skills are the three Junior Silva-specific legal skills linked above. They are not automatically pasted in full; Pi reads the relevant skill when the task matches its description.
 
 The actual saved Pi sessions confirm that the `.agents/skills` catalog is injected into the model-visible `<available_skills>` list, alongside Pi’s own `.pi/skills`.
 
@@ -163,9 +164,9 @@ Contract: required `question`, `delivery_mode` (`direct_answer` or `supporting_w
 
 8. `legal_source_retrieve_details`
 
-> Retrieve bounded underlying detail from the same read-only Sri Lankan legal source collections used behind RAG research. Use RAG Chat first for normal research, synthesis, authority selection and linked citations. Use this only when the answer cites or identifies a case, Act/article/section, or law-book passage and you genuinely need more source detail—such as the judgment text, original Act/section text, or commentary passage—to answer accurately. Do not use it as a replacement for RAG’s legal research pipeline. For cases, chunks and books this reads Typesense. For legislation it uses Lex’s structured SQLite authority API rather than the unreliable Typesense fallback. For an Act, first find its record; retrieve the Act ID for its ordered original sections, or pass the Act ID with section_number for one exact section. A numeric section-row ID may also be retrieved directly. Use metadata only when high-level Act details are enough. Choose only fields needed. Returned material is source evidence, not a conclusion; preserve returned source links and never invent amendment history or amendment URLs.
+> Read bounded material from the read-only Sri Lankan legal source collections behind research. Use operation=case_catalog first for a simple indexed case list defined by judge, year/month, subject, court, report series, report year/volume/page, or action type. Pass every stated constraint separately. The tool resolves ordinary judge spelling differences, omitted middle names, court names, report abbreviations, and month names against bounded indexed facets; ask the user only if the result is genuinely ambiguous. Never compose raw database filters. Use operation=amendment_catalog with source=legislation, legislation_title, and amendment_year for a factual list of structured Lex amendment entries. Use retrieve for only selected case/Act records needing fuller text. Use RAG Chat for legal analysis or synthesis.
 
-Contract: required `source` (`case_decision`, `case_chunk`, `legislation`, `book`) and `operation` (`find`, `retrieve`). Optional query/authority identifiers, selected `fields[]`, Act/section scope, `max_results` 1–8, and field character limit. Read-only.
+Contract: required `source` (`case_decision`, `case_chunk`, `legislation`, `book`) and `operation` (`find`, `retrieve`, `case_catalog`, `amendment_catalog`, `capabilities`). Case catalogue accepts `subject_query`, `judge_name`, `decision_year`, `decision_month`, `court`, `report`, `report_year`, `volume_num`, `page_num`, and `action_type`. Amendment catalogue requires `legislation_title` and `amendment_year`. Read-only.
 
 9. `translator_siriwardena_translate_document`
 
@@ -214,6 +215,8 @@ Pi receives:
 
 So, for example:
 
+- “Cases decided by Judge X in 2026 on tax” → reads `sri-lankan-legal-research`, then `legal_source_retrieve_details` with `case_catalog`; it retrieves detail only for selected case records.
+- “What amendments were made to the Companies Act in 2025?” → reads `sri-lankan-legal-research`, then calls Lex through `legal_source_retrieve_details` with `amendment_catalog`; RAG is used only if the user asks for analysis of the amendments.
 - “What does this Act say?” → `rag_chat_research`; perhaps `legal_source_retrieve_details` for full underlying text.
 - “What is the latest Gazette?” → web search, possibly RAG too.
 - “Review these agreements” → reads review skill, prepares the document set, asks the evidence checkpoint where needed, then finalises annotated reviews.
@@ -229,7 +232,7 @@ So, for example:
 
 - **RAG citations:** [rag.mjs](junior-silva/services/rag.mjs) gets the synthesised RAG answer, extracts its Markdown authorities into a separate delivery bundle, and the citation extension makes sure the final answer preserves them.
 
-- **Legal-source details:** Cases/chunks/books come from Typesense; Acts and sections use Lex’s structured SQLite authority API. The implementation is in [typesense-legal-sources.mjs](junior-silva/core/typesense-legal-sources.mjs) and [lex-legislation-sources.mjs](junior-silva/core/lex-legislation-sources.mjs).
+- **Legal-source details:** Cases/chunks/books come from Typesense; Acts and sections use Lex’s structured SQLite authority API. `case_catalog` resolves natural judge/court/report/month input through safe bounded facets, applies only documented structured filters, and returns paginated matching metadata before Pi retrieves selected detail. `amendment_catalog` resolves an Act title, reads its complete structured Lex record, and returns every matching indexed amendment entry for the requested year. The implementation is in [typesense-legal-sources.mjs](junior-silva/core/typesense-legal-sources.mjs) and [lex-legislation-sources.mjs](junior-silva/core/lex-legislation-sources.mjs).
 
 - **Public web research:** [web.mjs](junior-silva/services/web.mjs) uses Serper. It does not itself scrape/rerank through Firecrawl/Jina in the current V2 path.
 

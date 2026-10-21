@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { legalSourceDefinitions } from "../core/typesense-legal-sources.mjs";
+import { legalSourceDefinitions, retrieveLegalSourceDetails } from "../core/typesense-legal-sources.mjs";
 import { lexLegislationFields, retrieveLexLegislationDetails } from "../core/lex-legislation-sources.mjs";
 
 test("direct legal source retrieval exposes a fixed, bounded source and field contract", () => {
@@ -13,6 +13,74 @@ test("direct legal source retrieval exposes a fixed, bounded source and field co
 	assert.ok(lexLegislationFields.includes("section_subsections"));
 	assert.ok(lexLegislationFields.includes("amendments"));
 	assert.ok(lexLegislationFields.includes("pdf_urls"));
+});
+
+test("case catalogue resolves an indexed judge before applying judge, year, and subject filters", async () => {
+	const originalFetch = globalThis.fetch;
+	const previous = Object.fromEntries(["JUNIOR_TYPESENSE_ENABLED", "JUNIOR_TYPESENSE_DECISION_HOST", "JUNIOR_TYPESENSE_DECISION_API_KEY"].map((key) => [key, process.env[key]]));
+	process.env.JUNIOR_TYPESENSE_ENABLED = "true";
+	process.env.JUNIOR_TYPESENSE_DECISION_HOST = "decisions.example.test";
+	process.env.JUNIOR_TYPESENSE_DECISION_API_KEY = "test-key";
+	const requests = [];
+	globalThis.fetch = async (input) => {
+		const url = new URL(String(input));
+		requests.push(url);
+		if (url.searchParams.get("facet_by") === "judge_final") {
+			return new Response(JSON.stringify({ facet_counts: [{ field_name: "judge_final", counts: [{ value: "Mahinda Samayawardhena, J.", count: 4 }, { value: "Other Judge, J.", count: 1 }] }] }), { status: 200 });
+		}
+		return new Response(JSON.stringify({
+			found: 2,
+			hits: [{ document: { primary_key: "case-1", standard_casenumber: "SC/Tax/1", nameofparties: "Commissioner General v Silva", summary_text: "A tax assessment decision.", keywords: ["tax"], judge_final: "Mahinda Samayawardhena, J.", decision_year: 2026, sc_or_ca: "SC", link: "https://lex.example/case-1" } }],
+		}), { status: 200 });
+	};
+	try {
+		const result = await retrieveLegalSourceDetails({ source: "case_decision", operation: "case_catalog", judge_name: "Mahinda Samayawardhena", decision_year: 2026, subject_query: "tax", page_size: 10 });
+		assert.equal(requests.length, 2);
+		assert.equal(requests[0].searchParams.get("q"), "*");
+		assert.equal(requests[0].searchParams.get("filter_by"), "decision_year:=2026");
+		assert.equal(requests[1].searchParams.get("q"), "tax");
+		assert.equal(requests[1].searchParams.get("filter_by"), "judge_final:=`Mahinda Samayawardhena, J.` && decision_year:=2026");
+		assert.equal(result.judge_resolution.status, "resolved");
+		assert.equal(result.judge_resolution.value, "Mahinda Samayawardhena, J.");
+		assert.equal(result.found, 2);
+		assert.equal(result.has_more, false);
+		assert.ok(result.requested_fields.includes("summary_text"));
+		assert.ok(result.requested_fields.includes("link"));
+		assert.equal(result.records[0].record_id, "case-1");
+		assert.equal(result.records[0].fields.link, "https://lex.example/case-1");
+	} finally {
+		globalThis.fetch = originalFetch;
+		for (const [key, value] of Object.entries(previous)) {
+			if (value === undefined) delete process.env[key]; else process.env[key] = value;
+		}
+	}
+});
+
+test("case catalogue resolves a unique minor judge spelling variant without asking the user", async () => {
+	const originalFetch = globalThis.fetch;
+	const previous = Object.fromEntries(["JUNIOR_TYPESENSE_ENABLED", "JUNIOR_TYPESENSE_DECISION_HOST", "JUNIOR_TYPESENSE_DECISION_API_KEY"].map((key) => [key, process.env[key]]));
+	process.env.JUNIOR_TYPESENSE_ENABLED = "true";
+	process.env.JUNIOR_TYPESENSE_DECISION_HOST = "decisions.example.test";
+	process.env.JUNIOR_TYPESENSE_DECISION_API_KEY = "test-key";
+	const requests = [];
+	globalThis.fetch = async (input) => {
+		requests.push(new URL(String(input)));
+		if (!String(input).includes("facet_by")) return new Response(JSON.stringify({ found: 1, hits: [{ document: { primary_key: "case-1", standard_casenumber: "CA/1", nameofparties: "State v Person", summary_text: "Murder case", judge_final: "Sumudu Premachandra, J.", decision_year: 2026, link: "https://lex.example/case-1" } }] }), { status: 200 });
+		return new Response(JSON.stringify({ facet_counts: [{ field_name: "judge_final", counts: [{ value: "Sumudu Premachandra, J.", count: 2 }, { value: "Sumudu Perera, J.", count: 1 }] }] }), { status: 200 });
+	};
+	try {
+		const result = await retrieveLegalSourceDetails({ source: "case_decision", operation: "case_catalog", judge_name: "Sumudu Premachandr", decision_year: 2026, subject_query: "murder" });
+		assert.equal(requests.length, 2);
+		assert.equal(result.found, 1);
+		assert.equal(result.judge_resolution.status, "resolved");
+		assert.equal(result.judge_resolution.matched_by, "high_confidence_normalized");
+		assert.equal(result.judge_resolution.value, "Sumudu Premachandra, J.");
+	} finally {
+		globalThis.fetch = originalFetch;
+		for (const [key, value] of Object.entries(previous)) {
+			if (value === undefined) delete process.env[key]; else process.env[key] = value;
+		}
+	}
 });
 
 test("legislation section discovery falls back to authoritative Act discovery when Lex interactive search is restricted", async () => {
@@ -119,6 +187,84 @@ test("full four-section amendment is retained in source order and uses Lex servi
 		assert.deepEqual(result.records[0].fields.sections.map((section) => section.section_number), ["1", "2", "3", "4"]);
 		assert.equal(requestHeaders["X-API-Key"], "test-key");
 		assert.equal(requestHeaders.Authorization, undefined);
+	} finally {
+		globalThis.fetch = originalFetch;
+		if (oldUrl === undefined) delete process.env.JUNIOR_LEX_LEGISLATION_API_URL; else process.env.JUNIOR_LEX_LEGISLATION_API_URL = oldUrl;
+		if (oldKey === undefined) delete process.env.JUNIOR_LEX_LEGISLATION_API_KEY; else process.env.JUNIOR_LEX_LEGISLATION_API_KEY = oldKey;
+	}
+});
+
+test("case catalogue resolves court, report, month and numeric report filters before searching", async () => {
+	const originalFetch = globalThis.fetch;
+	const previous = Object.fromEntries(["JUNIOR_TYPESENSE_ENABLED", "JUNIOR_TYPESENSE_DECISION_HOST", "JUNIOR_TYPESENSE_DECISION_API_KEY"].map((key) => [key, process.env[key]]));
+	process.env.JUNIOR_TYPESENSE_ENABLED = "true";
+	process.env.JUNIOR_TYPESENSE_DECISION_HOST = "decisions.example.test";
+	process.env.JUNIOR_TYPESENSE_DECISION_API_KEY = "test-key";
+	const requests = [];
+	globalThis.fetch = async (input) => {
+		const url = new URL(String(input));
+		requests.push(url);
+		const field = url.searchParams.get("facet_by");
+		if (field) {
+			const values = { sc_or_ca: "CA", report: "NLR", decision_month: "9" };
+			return new Response(JSON.stringify({ facet_counts: [{ field_name: field, counts: [{ value: values[field], count: 3 }] }] }), { status: 200 });
+		}
+		return new Response(JSON.stringify({ found: 1, hits: [{ document: { primary_key: "case-2", standard_casenumber: "CA/NLR/1", nameofparties: "A v B", summary_text: "Tax", report: "NLR", sc_or_ca: "CA", decision_month: "9", decision_year: 2026, report_year: 2026, volume_num: 3, page_num: 99, link: "https://lex.example/case-2" } }] }), { status: 200 });
+	};
+	try {
+		const result = await retrieveLegalSourceDetails({ source: "case_decision", operation: "case_catalog", court: "Court of Appeal", report: "NLR", decision_month: "September", decision_year: 2026, report_year: 2026, volume_num: 3, page_num: 99, subject_query: "tax" });
+		assert.equal(result.found, 1);
+		assert.equal(result.applied_filters.sc_or_ca, "CA");
+		assert.equal(result.applied_filters.report, "NLR");
+		assert.equal(result.applied_filters.decision_month, "9");
+		assert.match(requests.at(-1).searchParams.get("filter_by"), /sc_or_ca:=`CA`/);
+		assert.match(requests.at(-1).searchParams.get("filter_by"), /report:=`NLR`/);
+		assert.match(requests.at(-1).searchParams.get("filter_by"), /decision_month:=`9`/);
+		assert.match(requests.at(-1).searchParams.get("filter_by"), /report_year:=2026/);
+	} finally {
+		globalThis.fetch = originalFetch;
+		for (const [key, value] of Object.entries(previous)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
+	}
+});
+
+test("case catalogue requests confirmation for genuinely ambiguous judge matches", async () => {
+	const originalFetch = globalThis.fetch;
+	const previous = Object.fromEntries(["JUNIOR_TYPESENSE_ENABLED", "JUNIOR_TYPESENSE_DECISION_HOST", "JUNIOR_TYPESENSE_DECISION_API_KEY"].map((key) => [key, process.env[key]]));
+	process.env.JUNIOR_TYPESENSE_ENABLED = "true";
+	process.env.JUNIOR_TYPESENSE_DECISION_HOST = "decisions.example.test";
+	process.env.JUNIOR_TYPESENSE_DECISION_API_KEY = "test-key";
+	globalThis.fetch = async () => new Response(JSON.stringify({ facet_counts: [{ field_name: "judge_final", counts: [{ value: "A. Perera, J.", count: 2 }, { value: "B. Perera, J.", count: 2 }] }] }), { status: 200 });
+	try {
+		const result = await retrieveLegalSourceDetails({ source: "case_decision", operation: "case_catalog", judge_name: "Perera", decision_year: 2026 });
+		assert.equal(result.found, 0);
+		assert.equal(result.judge_resolution.status, "needs_confirmation");
+		assert.equal(result.judge_resolution.candidates.length, 2);
+	} finally {
+		globalThis.fetch = originalFetch;
+		for (const [key, value] of Object.entries(previous)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
+	}
+});
+
+test("Lex amendment catalogue retains every matching structured amendment rather than a truncated summary", async () => {
+	const originalFetch = globalThis.fetch;
+	const oldUrl = process.env.JUNIOR_LEX_LEGISLATION_API_URL;
+	const oldKey = process.env.JUNIOR_LEX_LEGISLATION_API_KEY;
+	process.env.JUNIOR_LEX_LEGISLATION_API_URL = "https://lex.example.test";
+	process.env.JUNIOR_LEX_LEGISLATION_API_KEY = "test-key";
+	globalThis.fetch = async (input) => {
+		const url = String(input);
+		if (url.includes("/api/legislations?")) return new Response(JSON.stringify({ items: [{ id: "legislation_C_1", title: "Companies Act No. 7 of 2007", section_count: 500 }] }), { status: 200 });
+		return new Response(JSON.stringify({ id: "legislation_C_1", title: "Companies Act No. 7 of 2007", amendments: [
+			{ reference: "Companies (Amendment) Act No. 1 of 2025", enactment_date: "2025-01-10", url: "https://lex.example/amendment-1" },
+			{ reference: "Companies (Amendment) Act No. 2 of 2025", date: "2025-06-11", url: "https://lex.example/amendment-2", affected_provisions: ["s. 12"] },
+			{ reference: "Companies (Amendment) Act No. 1 of 2024", enactment_date: "2024-04-01", url: "https://lex.example/amendment-2024" },
+		] }), { status: 200 });
+	};
+	try {
+		const result = await retrieveLexLegislationDetails({ operation: "amendment_catalog", legislation_title: "Companies Act", amendment_year: 2025 });
+		assert.equal(result.found, 2);
+		assert.equal(result.amendments.length, 2);
+		assert.deepEqual(result.amendments.map((item) => item.url), ["https://lex.example/amendment-1", "https://lex.example/amendment-2"]);
 	} finally {
 		globalThis.fetch = originalFetch;
 		if (oldUrl === undefined) delete process.env.JUNIOR_LEX_LEGISLATION_API_URL; else process.env.JUNIOR_LEX_LEGISLATION_API_URL = oldUrl;

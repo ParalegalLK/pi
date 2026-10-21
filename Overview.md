@@ -67,6 +67,7 @@ pi/
 │       ├── pdf/                             PDF extraction, creation and checks
 │       ├── pptx/                            PowerPoint creation and utilities
 │       ├── sri-lankan-legal-drafting/       native legal-drafting decision guidance
+│       ├── sri-lankan-legal-research/       direct catalogue versus legal-analysis routing
 │       ├── sri-lankan-legal-review/         evidence-first native review guidance
 │       ├── writing-style/                   writing-quality guidance
 │       └── xlsx/                            workbook creation/recalculation guidance
@@ -168,7 +169,7 @@ All tools are declared in junior-silva/mcp/server.mjs and exposed directly by .p
 | legal_precedent_search / legal_precedent_read | Read a bounded excerpt from a private, read-only drafting corpus. | Structure only, never legal authority or user-visible source material. |
 | legal_validate_draft | Finds unresolved placeholders and basic hygiene issues in a draft. | Legal propositions still require RAG validation. |
 | rag_chat_research | Queries Sri Lankan legal research with authority links. | direct_answer is for research as the final answer; supporting_work_product is for research underpinning an email, letter, complaint, etc. |
-| legal_source_retrieve_details | Finds or retrieves bounded source material behind an already-relevant authority: case decisions, case passages and books use scoped Typesense search; Acts/constitutional material use Lex’s structured API for the original Act or exact section. | Use after RAG only when deeper source detail is genuinely required. For legislation, retrieve by Act ID or Act ID plus `section_number`; it accepts only known sources/fields, never raw infrastructure controls, and does not invent amendment history. |
+| legal_source_retrieve_details | Lists indexed case decisions through `case_catalog`, or finds/retrieves bounded source material: cases, case passages and books use scoped Typesense search; Acts/constitutional material use Lex’s structured API for the original Act or exact section. | Use `case_catalog` directly for a factual judge/year/topic/court/action-type case list. It resolves judges against indexed values, applies safe structured filters, returns paginated links, and reports ambiguity rather than guessing. Use RAG for legal analysis and synthesis. |
 | translator_siriwardena_translate_document | Translates a supported document. | Returns localized generated files where the service provides them. |
 | translator_siriwardena_translate_text | Translates supplied text. | Avoids unnecessary document drafting. |
 | web_search_public_legal_sources | Searches current public legal/news sources. | No client personal facts in query; use RAG too when current sources may change stable law. |
