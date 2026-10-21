@@ -53,7 +53,10 @@ Before the broader suite, verify review interaction behavior for a substantive p
 
 ## Direct legal-source detail retrieval
 
-- First obtain a normal Sri Lankan legal answer through `rag_chat_research`; confirm RAG remains the primary synthesis and citation tool.
+- For “tax cases decided by Judge Mahinda Samayawardhena in 2026,” confirm Pi calls `legal_source_retrieve_details` with `operation: case_catalog`, not `rag_chat_research`. The trace should show exact judge resolution, a 2026 filter, a tax subject query, paginated case metadata, and source links.
+- For a misspelled or ambiguous judge name, confirm the direct tool returns bounded candidate names and Pi asks for clarification rather than selecting a judge.
+- For “What legal principles emerge from those tax cases?”, confirm Pi retrieves selected case details and uses `rag_chat_research` for the resulting analysis rather than treating the catalogue alone as a legal conclusion.
+- First obtain a normal Sri Lankan legal answer through `rag_chat_research`; confirm RAG remains the primary synthesis and citation tool where the user asks for analysis.
 - When more detail about a cited authority is necessary, use `legal_source_retrieve_details` to find a known case and then retrieve bounded `decision_text` with its original link.
 - Verify a case-chunk query returns a matching source passage and PDF link; verify book retrieval returns the book/chapter identifiers and reader context.
 - Verify legislation retrieval discovers an Act through Lex, retrieves its complete ordered original sections with the Act ID, and retrieves an exact provision using that Act ID plus `section_number`. Use the Twenty Second Amendment to the Constitution (four sections) and section 57 of the Consumer Affairs Authority Act as controlled checks. Preserve only links returned by Lex; never invent amendment history or URLs. If the configured legislation endpoint is unavailable, it must fail without exposing an API key or raw service diagnostics. Respect Lex's five reader-page loads per minute limit during live checks.

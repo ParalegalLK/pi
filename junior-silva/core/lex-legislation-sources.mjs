@@ -47,6 +47,72 @@ function collectAmendments(value, collected = []) {
 	return collected;
 }
 
+function normaliseTitle(value) {
+	return String(value || "").toLocaleLowerCase("en-US").replace(/[’'.,()/_-]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function titleScore(query, candidate) {
+	const wanted = normaliseTitle(query);
+	const value = normaliseTitle(candidate);
+	if (!wanted || !value) return 0;
+	if (wanted === value) return 1;
+	const wantedWords = wanted.split(" ");
+	const valueWords = value.split(" ");
+	const common = wantedWords.filter((word) => valueWords.includes(word)).length;
+	if (wantedWords.every((word) => valueWords.includes(word))) return 0.98;
+	return common / Math.max(wantedWords.length, valueWords.length);
+}
+
+function amendmentEntry(value, context = {}) {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+	const reference = value.ref || value.reference || value.title || value.name || value.act || null;
+	const url = value.url || value.link || value.href || null;
+	const date = value.enactment_date || value.date || value.certified_date || value.effective_date || value.commencement_date || null;
+	const yearMatch = String(date || reference || "").match(/\b(18\d{2}|19\d{2}|20\d{2}|21\d{2})\b/);
+	if (!reference && !url && !date) return null;
+	return {
+		reference: reference ? String(reference) : null,
+		url: typeof url === "string" ? url : null,
+		date: date ? String(date) : null,
+		year: yearMatch ? Number(yearMatch[1]) : null,
+		affected_provisions: value.affected_provisions || value.provisions || value.sections || value.section_numbers || (context.section_number ? [context.section_number] : undefined),
+	};
+}
+
+function collectFullAmendments(value, collected = [], context = {}) {
+	if (Array.isArray(value)) {
+		for (const item of value) collectFullAmendments(item, collected, context);
+		return collected;
+	}
+	if (!value || typeof value !== "object") return collected;
+	const nextContext = {
+		section_number: value.section_number || context.section_number,
+		section_title: value.section_title || context.section_title,
+	};
+	if (Array.isArray(value.amendments)) {
+		for (const amendment of value.amendments) {
+			const entry = amendmentEntry(amendment, nextContext);
+			if (entry) collected.push(entry);
+			collectFullAmendments(amendment, collected, nextContext);
+		}
+	}
+	for (const [key, item] of Object.entries(value)) if (key !== "amendments") collectFullAmendments(item, collected, nextContext);
+	return collected;
+}
+
+function distinctAmendments(entries) {
+	const distinct = new Map();
+	for (const entry of entries) {
+		const key = JSON.stringify([entry.reference, entry.url, entry.date, entry.year]);
+		const existing = distinct.get(key);
+		if (!existing) { distinct.set(key, { ...entry }); continue; }
+		const asList = (value) => Array.isArray(value) ? value : value ? [value] : [];
+		const affected = [...new Set([...asList(existing.affected_provisions), ...asList(entry.affected_provisions)])];
+		if (affected.length) existing.affected_provisions = affected;
+	}
+	return [...distinct.values()];
+}
+
 function pick(record, fields, maximum) {
 	const state = { truncated: false };
 	const values = {};
@@ -112,6 +178,44 @@ export async function retrieveLexLegislationDetails(args, { onProgress = () => {
 	const maxResults = Math.min(Math.max(Number(args.max_results || 5), 1), MAX_RESULTS);
 	onProgress("Retrieving structured Sri Lankan legislation detail…");
 
+	if (operation === "amendment_catalog") {
+		const title = String(args.legislation_title || args.query || "").trim();
+		const amendmentYear = boundedYear(args.amendment_year);
+		if (!title) throw new Error("legislation_title is required to list an Act's amendments.");
+		if (!amendmentYear) throw new Error("amendment_year is required to list amendments made in a particular year.");
+		onProgress("Resolving the Act title and reading its complete structured amendment record…");
+		const found = await get("/api/legislations", { q: title, per_page: 25 });
+		const candidates = (found.items || [])
+			.map((item) => ({ item, score: titleScore(title, item?.title || item?.legislation_title) }))
+			.sort((left, right) => right.score - left.score || Number(right.item?.section_count || 0) - Number(left.item?.section_count || 0));
+		const selected = candidates[0]?.item;
+		if (!selected || candidates[0].score < 0.5) return {
+			source: "legislation", source_label: "structured Lex legislation records", operation,
+			found: 0, amendment_year: amendmentYear, amendments: [], records: [],
+			guidance: "Lex did not confidently resolve the requested Act title. Ask for the Act's exact title or number rather than guessing.",
+		};
+		const recordId = selected.id || selected.legislation_id;
+		const legislation = await get(`/api/legislations/${encodeURIComponent(recordId)}`);
+		const amendments = distinctAmendments(collectFullAmendments(legislation)).filter((entry) => entry.year === amendmentYear);
+		return {
+			source: "legislation",
+			source_label: "structured Lex legislation records",
+			operation,
+			found: amendments.length,
+			amendment_year: amendmentYear,
+			legislation: {
+				record_id: recordId,
+				title: legislation?.title || legislation?.legislation_title || selected.title || selected.legislation_title,
+				enactment_date: legislation?.enactment_date || selected.enactment_date,
+			},
+			amendments,
+			records: [],
+			guidance: amendments.length
+				? "These are every structured amendment entry in Lex for the resolved Act that matched the requested year. Preserve each returned link and distinguish an enactment date from a commencement date when both are present."
+				: "Lex returned no structured amendment entry for that Act and year. Do not infer that no amendment exists outside the indexed Lex record; say the indexed record has no matching entry.",
+		};
+	}
+
 	if (operation === "find") {
 		const query = String(args.query || args.legislation_title || "").trim();
 		if (!query) throw new Error("Provide query or legislation_title to find legislation.");
@@ -166,3 +270,25 @@ export async function retrieveLexLegislationDetails(args, { onProgress = () => {
 }
 
 export const lexLegislationFields = LEGISLATION_FIELDS;
+
+function boundedYear(value) {
+	if (value === undefined || value === null || value === "") return undefined;
+	const number = Number(value);
+	if (!Number.isInteger(number) || number < 1800 || number > 2200) throw new Error("amendment_year must be an integer from 1800 to 2200.");
+	return number;
+}
+
+export function lexLegislationCapabilities() {
+	return {
+		source: "legislation",
+		source_label: "structured Lex legislation records",
+		operation: "capabilities",
+		available_fields: LEGISLATION_FIELDS,
+		supported_filters: {
+			legislation_title: { label: "Act title", type: "resolved structured title" },
+			section_number: { label: "section number", type: "exact value after Act selection" },
+			amendment_year: { label: "amendment year", type: "integer; used with amendment_catalog" },
+		},
+		guidance: "Lex supports title discovery and exact Act/section reads. amendment_catalog reads the complete selected Act record and locally filters its structured amendment entries by year; it does not use the unreliable legislation Typesense fallback.",
+	};
+}
