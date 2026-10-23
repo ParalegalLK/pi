@@ -3,6 +3,7 @@ import { lexLegislationCapabilities, retrieveLexLegislationDetails } from "./lex
 
 const MAX_RESULTS = 8;
 const MAX_CATALOG_RESULTS = 20;
+const MAX_FACET_VALUES = 250;
 const MAX_CATALOG_FIELD_CHARS = 2_400;
 const DEFAULT_FIELD_CHARS = 12_000;
 const MAX_FIELD_CHARS = 60_000;
@@ -114,6 +115,13 @@ function exactStringFilter(field, value) {
 	return `${field}:=\`${safe}\``;
 }
 
+function exactStringListFilter(field, values) {
+	const safe = [...new Set(values.map((value) => filterValue(value)).filter(Boolean))];
+	if (!safe.length) throw new Error(`${field} contains no usable values.`);
+	if (safe.length === 1) return exactStringFilter(field, safe[0]);
+	return `${field}:=[${safe.map((value) => `\`${value}\``).join(", ")}]`;
+}
+
 function normalizedValue(value) {
 	return String(value || "")
 		.toLocaleLowerCase("en-US")
@@ -207,7 +215,15 @@ function confidentResolution(field, requested, values) {
 }
 
 function resolvedValue(resolutions, key) {
-	return resolutions[key]?.status === "resolved" ? resolutions[key].value : undefined;
+	const values = resolvedValues(resolutions, key);
+	return values.length === 1 ? values[0] : undefined;
+}
+
+function resolvedValues(resolutions, key) {
+	const resolution = resolutions[key];
+	if (resolution?.status === "resolved" && typeof resolution.value === "string") return [resolution.value];
+	if (resolution?.status === "resolved_multiple" && Array.isArray(resolution.values)) return resolution.values;
+	return [];
 }
 
 function catalogueFilter(args, resolutions = {}, { except } = {}) {
@@ -219,8 +235,8 @@ function catalogueFilter(args, resolutions = {}, { except } = {}) {
 			const maximum = key.includes("year") ? 2200 : 100_000;
 			filters.push(`${descriptor.field}:=${boundedInteger(args[key], { minimum: key.includes("year") ? 1800 : 1, maximum, fallback: undefined, name: key })}`);
 		} else {
-			const value = resolvedValue(resolutions, key);
-			if (value) filters.push(exactStringFilter(descriptor.field, value));
+			const values = resolvedValues(resolutions, key);
+			if (values.length) filters.push(exactStringListFilter(descriptor.field, values));
 		}
 	}
 	return filters.join(" && ");
@@ -242,7 +258,7 @@ function catalogParameters(config, args, fields, resolutions) {
 	return { params, page, pageSize, subject, filter };
 }
 
-function facetParameters(config, args, facetKey, resolutions) {
+function facetParameters(config, args, facetKey, resolutions, { query } = {}) {
 	const descriptor = config.definition.filterFields[facetKey];
 	const params = new URLSearchParams({
 		q: "*",
@@ -250,8 +266,10 @@ function facetParameters(config, args, facetKey, resolutions) {
 		per_page: "1",
 		include_fields: config.definition.identifierField,
 		facet_by: descriptor.field,
-		max_facet_values: "250",
+		max_facet_values: String(MAX_FACET_VALUES),
 	});
+	const facetQuery = String(query || "").trim();
+	if (facetQuery) params.set("facet_query", `${descriptor.field}:${facetQuery}`);
 	const filter = catalogueFilter(args, resolutions, { except: facetKey });
 	if (filter) params.set("filter_by", filter);
 	return params;
@@ -260,17 +278,87 @@ function facetParameters(config, args, facetKey, resolutions) {
 async function resolveFacet(config, args, key, resolutions) {
 	if (args[key] === undefined || args[key] === null || args[key] === "") return { status: "not_requested" };
 	const descriptor = config.definition.filterFields[key];
-	const payload = await fetchTypesense(config, facetParameters(config, args, key, resolutions));
-	return confidentResolution(descriptor.field, args[key], facetValues(payload, descriptor.field));
+	const payload = await fetchTypesense(config, facetParameters(config, args, key, resolutions, { query: args[key] }));
+	const values = facetValues(payload, descriptor.field);
+	const resolution = confidentResolution(descriptor.field, args[key], values);
+	if (key !== "judge_name" || resolution.status !== "resolved" || words(args[key]).length > 1) return resolution;
+	const candidates = rankedCandidates(values, args[key], descriptor.field);
+	if (candidates.length < 2) return resolution;
+	return {
+		status: "needs_selection",
+		requested: args[key],
+		candidates: candidates.map(({ score, ...candidate }) => ({ ...candidate, confidence: Number(score.toFixed(3)) })),
+		guidance: "The supplied judge name is incomplete and matches more than one indexed label. Select one exact label or explicitly request all returned labels before listing cases.",
+	};
+}
+
+async function resolveSelectedJudgeLabels(config, args, resolutions) {
+	if (!Array.isArray(args.judge_labels) || !args.judge_labels.length) return { status: "not_requested" };
+	if (args.judge_name) throw new Error("Use either judge_name or judge_labels, not both.");
+	const labels = [...new Set(args.judge_labels.map((value) => String(value || "").trim()).filter(Boolean))];
+	if (!labels.length || labels.length > 20) throw new Error("judge_labels must contain from 1 to 20 exact labels returned by facet_values.");
+	const resolved = [];
+	for (const label of labels) {
+		const payload = await fetchTypesense(config, facetParameters(config, args, "judge_name", resolutions, { query: label }));
+		const match = facetValues(payload, "judge_final").find((candidate) => normalizedJudgeName(candidate.value) === normalizedJudgeName(label));
+		if (!match) return { status: "needs_confirmation", requested: label, candidates: facetValues(payload, "judge_final").slice(0, 12), guidance: "Use only an exact label returned by facet_values." };
+		resolved.push(match.value);
+	}
+	return resolved.length === 1
+		? { status: "resolved", requested: labels[0], value: resolved[0], matched_by: "selected_exact_label", confidence: 1 }
+		: { status: "resolved_multiple", requested: labels, values: resolved, matched_by: "selected_exact_labels", confidence: 1 };
 }
 
 async function resolveCatalogueFacets(config, args) {
 	const resolutions = {};
 	for (const key of ["court", "report", "action_type", "decision_month", "judge_name"]) {
+		if (key === "judge_name" && Array.isArray(args.judge_labels) && args.judge_labels.length) {
+			resolutions[key] = await resolveSelectedJudgeLabels(config, args, resolutions);
+			if (resolutions[key].status !== "resolved" && resolutions[key].status !== "resolved_multiple") return resolutions;
+			continue;
+		}
 		resolutions[key] = await resolveFacet(config, args, key, resolutions);
-		if (resolutions[key].status !== "not_requested" && resolutions[key].status !== "resolved") return resolutions;
+		if (resolutions[key].status !== "not_requested" && resolutions[key].status !== "resolved" && resolutions[key].status !== "resolved_multiple") return resolutions;
 	}
 	return resolutions;
+}
+
+async function retrieveFacetValues(config, args, onProgress) {
+	if (args.source !== "case_decision") throw new Error("facet_values is supported only for full case decisions.");
+	const facetKey = String(args.facet_field || "");
+	if (!Object.hasOwn(config.definition.filterFields, facetKey)) throw new Error("facet_field must be one of: judge_name, court, report, action_type, decision_month.");
+	const query = String(args.facet_query || args.query || "").trim();
+	if (!query) throw new Error("facet_values requires facet_query.");
+	onProgress("Discovering matching indexed values and their decision counts…");
+	const resolutions = await resolveCatalogueFacets(config, { ...args, [facetKey]: undefined });
+	const unresolved = Object.values(resolutions).find((item) => item.status !== "not_requested" && item.status !== "resolved" && item.status !== "resolved_multiple");
+	if (unresolved) return {
+		source: args.source,
+		source_label: config.definition.label,
+		operation: "facet_values",
+		field: facetKey,
+		requested: query,
+		filter_resolution: resolutions,
+		values: [],
+		guidance: "A constraining filter could not be confidently resolved. Resolve it before relying on the value list.",
+	};
+	const descriptor = config.definition.filterFields[facetKey];
+	const payload = await fetchTypesense(config, facetParameters(config, { ...args, [facetKey]: undefined }, facetKey, resolutions, { query }));
+	const values = facetValues(payload, descriptor.field)
+		.sort((left, right) => right.count - left.count || left.value.localeCompare(right.value));
+	return {
+		source: args.source,
+		source_label: config.definition.label,
+		operation: "facet_values",
+		field: facetKey,
+		field_label: descriptor.label,
+		requested: query,
+		filter_resolution: resolutions,
+		values,
+		max_values: MAX_FACET_VALUES,
+		possibly_truncated: values.length === MAX_FACET_VALUES,
+		guidance: "These are distinct indexed values and decision counts, not an identity conclusion. For a broad or incomplete judge name, select one exact returned label or pass the returned labels together as judge_labels to case_catalog. Do not claim an omitted value is absent if possibly_truncated is true.",
+	};
 }
 
 function searchParameters(config, args, fields) {
@@ -330,7 +418,7 @@ function normalizeRecord(document, fields, maximum) {
 
 async function retrieveCaseCatalogue(config, args, maximum, onProgress) {
 	if (args.source !== "case_decision") throw new Error("case_catalog is supported only for full case decisions.");
-	const hasCriterion = [args.subject_query, args.query, args.judge_name, args.decision_year, args.decision_month, args.court, args.report, args.report_year, args.volume_num, args.page_num, args.action_type]
+	const hasCriterion = [args.subject_query, args.query, args.judge_name, args.judge_labels, args.decision_year, args.decision_month, args.court, args.report, args.report_year, args.volume_num, args.page_num, args.action_type]
 		.some((value) => value !== undefined && value !== null && String(value).trim());
 	if (!hasCriterion) throw new Error("case_catalog requires a subject query or at least one structured filter.");
 	onProgress("Resolving requested case-catalogue filters against indexed values…");
@@ -338,7 +426,7 @@ async function retrieveCaseCatalogue(config, args, maximum, onProgress) {
 	// A catalogue answer must carry enough metadata to identify and link the
 	// returned decision even when Pi asked for a narrower display field set.
 	const fields = requestedFields(config.definition, [...config.definition.catalogFields, ...(args.fields || [])]);
-	const unresolved = Object.values(resolutions).find((item) => item.status !== "not_requested" && item.status !== "resolved");
+	const unresolved = Object.values(resolutions).find((item) => item.status !== "not_requested" && item.status !== "resolved" && item.status !== "resolved_multiple");
 	if (unresolved) {
 		return {
 			source: args.source,
@@ -373,7 +461,7 @@ async function retrieveCaseCatalogue(config, args, maximum, onProgress) {
 		applied_filters: {
 			decision_year: args.decision_year === undefined || args.decision_year === null || args.decision_year === "" ? undefined : Number(args.decision_year),
 			decision_month: resolvedValue(resolutions, "decision_month"),
-			judge_final: resolvedValue(resolutions, "judge_name"),
+			judge_final: resolvedValues(resolutions, "judge_name"),
 			sc_or_ca: resolvedValue(resolutions, "court"),
 			report: resolvedValue(resolutions, "report"),
 			report_year: args.report_year === undefined || args.report_year === null || args.report_year === "" ? undefined : Number(args.report_year),
@@ -385,7 +473,7 @@ async function retrieveCaseCatalogue(config, args, maximum, onProgress) {
 		requested_fields: fields,
 		available_fields: config.definition.fields,
 		records: (payload.hits || []).map((hit) => normalizeRecord(hit.document || {}, fields, Math.min(maximum, MAX_CATALOG_FIELD_CHARS))),
-		guidance: "These are indexed case-catalogue matches, not a legal conclusion or a complete court registry. Preserve returned case links. Retrieve bounded decision detail for selected cases before describing a holding; use RAG Chat when the user asks for legal analysis or synthesis.",
+		guidance: "These are indexed case-catalogue matches, not a legal conclusion or a complete court registry. Preserve returned case links. Retrieve bounded decision detail for selected cases before describing a holding; use RAG Chat when the user asks for legal analysis or synthesis. When judge_final contains multiple labels, keep the results grouped or clearly state that the catalogue searched their union.",
 	};
 }
 
@@ -397,7 +485,8 @@ async function sourceCapabilities(config) {
 		operation: "capabilities",
 		available_fields: definition.fields,
 		supported_filters: Object.fromEntries(Object.entries(definition.filterFields).map(([name, item]) => [name, { label: item.label, type: item.kind === "integer" ? "integer" : "canonical indexed value" }])),
-		guidance: "Use only documented parameters. Canonical names for judge, court, report, action type and month are resolved internally from bounded index facets; do not compose raw filters.",
+		supported_value_discovery: ["judge_name", "court", "report", "action_type", "decision_month"],
+		guidance: "Use facet_values before a variant, indexed-label, or incomplete-name question. Canonical names for judge, court, report, action type and month are resolved internally from bounded index facets; do not compose raw filters.",
 	};
 	if (definition === SOURCE_DEFINITIONS.book) {
 		const schema = await fetchCollectionSchema(config);
@@ -433,6 +522,7 @@ export async function retrieveLegalSourceDetails(args, { onProgress = () => {} }
 	const configuredLimit = Number(env("JUNIOR_TYPESENSE_MAX_FIELD_CHARS", String(DEFAULT_FIELD_CHARS)));
 	const maximum = Math.min(Math.max(Number(args.max_field_characters || configuredLimit), 1_000), MAX_FIELD_CHARS);
 	if (args.operation === "capabilities") return sourceCapabilities(config);
+	if (args.operation === "facet_values") return retrieveFacetValues(config, { ...args, source }, onProgress);
 	if (args.operation === "case_catalog") return retrieveCaseCatalogue(config, { ...args, source }, maximum, onProgress);
 	const fields = requestedFields(config.definition, args.fields);
 	onProgress(`Retrieving bounded detail from ${config.definition.label}…`);
