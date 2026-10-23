@@ -7,10 +7,10 @@ import { createProvider, type Provider } from "../models.ts";
 import { OPENCODE_GO_MODELS } from "./opencode-go.models.ts";
 import { withOpenCodeSessionHeader } from "./opencode-headers.ts";
 
-export function opencodeGoProvider(): Provider<
-	"anthropic-messages" | "google-generative-ai" | "openai-completions" | "openai-responses"
-> {
-	return createProvider<"anthropic-messages" | "google-generative-ai" | "openai-completions" | "openai-responses">({
+type OpenCodeGoApi = "anthropic-messages" | "google-generative-ai" | "openai-completions" | "openai-responses";
+
+export function opencodeGoProvider(): Provider<OpenCodeGoApi> {
+	return createProvider<OpenCodeGoApi>({
 		id: "opencode-go",
 		name: "OpenCode Go",
 		auth: { apiKey: envApiKeyAuth("OpenCode API key", ["OPENCODE_API_KEY"]) },

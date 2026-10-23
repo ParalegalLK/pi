@@ -99,6 +99,10 @@ function looksLikeSeparateWorkProduct(text: string) {
 		|| /(^|\n)\s*#{1,4}\s*(?:draft|letter|email|complaint|submission|advice note)\b/im.test(text);
 }
 
+function looksLikeIncompleteArtifactReply(text: string) {
+	return /(?:needs?\s+(?:one|a)\s+more\s+(?:fix|change)|couldn['’]t\s+complete\s+one\s+document|still\s+being\s+prepared|not\s+(?:yet\s+)?finali[sz]ed)/i.test(text);
+}
+
 export default function legalResearchCitationDelivery(pi: ExtensionAPI) {
 	let directResearchAnswer: string | undefined;
 	let hasOtherSpecialistResult = false;
@@ -129,6 +133,9 @@ export default function legalResearchCitationDelivery(pi: ExtensionAPI) {
 		if (event.message.role !== "assistant") return;
 		const text = event.message.content.filter((part) => part.type === "text").map((part) => part.text || "").join("\n");
 		if (!text.trim()) return;
+		// The hosted endpoint reconciles a generated-but-undelivered file. Do not
+		// make this partial reply look complete by appending a citation appendix.
+		if (looksLikeIncompleteArtifactReply(text)) return;
 		// The delivery mode is explicit, but the conservative guard also protects a
 		// user-visible letter/email if a model mistakenly selected direct_answer.
 		if (directResearchAnswer && !hasOtherSpecialistResult && !looksLikeSeparateWorkProduct(text)) return { message: { ...event.message, content: [{ type: "text", text: directResearchAnswer }] } };
