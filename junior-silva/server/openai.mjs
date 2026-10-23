@@ -162,35 +162,189 @@ function piPrompt(instruction, files) {
 }
 
 const safeToolProgress = Object.freeze({
-	review_prepare_document_set: "Reviewing the supplied legal document set…",
-	review_finalize_document: "Preparing the annotated legal review…",
-	legal_precedent_search: "Consulting drafting structure…",
-	legal_precedent_read: "Reviewing a drafting pattern…",
-	legal_validate_draft: "Checking the legal draft for completeness…",
-	rag_chat_research: "Researching Sri Lankan legal authorities and linked citations…",
-	legal_source_retrieve_details: "Retrieving an underlying Sri Lankan legal source…",
-	web_search_public_legal_sources: "Checking current public legal sources…",
-	translator_siriwardena_translate_document: "Translator Siriwardena is translating the document…",
-	translator_siriwardena_translate_text: "Translator Siriwardena is translating the supplied text…",
-	code_runner_data_transform: "Performing a legal calculation or structured analysis…",
-	workbench_publish_artifact: "Publishing the completed legal file for download…",
-	librechat_prepare_document_preview: "Preparing a local document preview…",
+	review_prepare_document_set: "Reading the supplied documents and identifying the material clauses…",
+	review_record_checkpoint_outcome: "Recording the additional information provided for this review…",
+	review_finalize_document: "Validating the findings against the source clauses and preparing the annotated review…",
+	legal_precedent_search: "Consulting approved drafting patterns to improve the document structure…",
+	legal_precedent_read: "Checking a relevant drafting pattern for the requested legal document…",
+	legal_validate_draft: "Checking the legal draft for unresolved details and basic completeness…",
+	rag_chat_research: "Researching Sri Lankan legal authorities and checking the cited sources…",
+	web_search_public_legal_sources: "Checking current public legal sources and recent developments…",
+	translator_siriwardena_translate_document: "Translating the document while preserving its legal meaning…",
+	translator_siriwardena_translate_text: "Translating the supplied text while preserving its legal meaning…",
+	code_runner_data_transform: "Calculating and organising the requested legal information…",
+	workbench_publish_artifact: "Preparing the completed file for secure download…",
+	librechat_prepare_document_preview: "Preparing an in-chat preview of the completed document…",
 });
 
-export function safeProgressName(toolName) {
+const knownToolNames = new Set([
+	...Object.keys(safeToolProgress),
+	"legal_source_retrieve_details",
+]);
+
+function normalisedToolName(toolName) {
 	const raw = String(toolName || "");
-	const normalized = Object.keys(safeToolProgress).find((name) => raw === name || raw.endsWith(`__${name}`)) || raw;
+	return [...knownToolNames].find((name) => raw === name || raw.endsWith(`__${name}`)) || raw;
+}
+
+// This is deliberately a closed vocabulary. Pi tool arguments can contain user
+// material, filesystem locations, URLs, and secrets, so thought messages may
+// inspect only enumerated operation values and must never interpolate them.
+function safeOperation(args) {
+	const operation = typeof args?.operation === "string" ? args.operation : "";
+	return ["case_catalog", "amendment_catalog", "capabilities", "facet_values", "retrieve"].includes(operation) ? operation : "";
+}
+
+export function safeProgressName(toolName, args = undefined) {
+	const normalized = normalisedToolName(toolName);
+	if (normalized === "legal_source_retrieve_details") {
+		switch (safeOperation(args)) {
+			case "case_catalog": return "Searching the Sri Lankan case records using the relevant legal filters…";
+			case "amendment_catalog": return "Checking the structured legislation record for the relevant amendments…";
+			case "capabilities":
+			case "facet_values": return "Checking the available Sri Lankan legal records for matching entries…";
+			case "retrieve": return "Reading the selected Sri Lankan legal source record for the necessary detail…";
+			default: return "Retrieving the relevant Sri Lankan legal source material…";
+		}
+	}
 	if (safeToolProgress[normalized]) return safeToolProgress[normalized];
-	if (/^(bash|shell|terminal|exec|run_command)$/i.test(normalized)) return "Preparing the requested legal work product…";
-	if (/^(read|read_file|list|find|glob|grep|search_files)$/i.test(normalized)) return "Reviewing supplied legal material…";
-	if (/^(write|edit|create_file|apply_patch)$/i.test(normalized)) return "Preparing the requested legal work product…";
-	if (/skill/i.test(normalized)) return "Applying a relevant legal work skill…";
-	return "Using a legal work tool…";
+	if (/^(bash|shell|terminal|exec|run_command)$/i.test(normalized)) return "Preparing the requested legal document and checking its structure…";
+	if (/^(read|read_file|list|find|glob|grep|search_files)$/i.test(normalized)) return "Reading the supplied material and identifying the points that matter…";
+	if (/^(write|edit|create_file|apply_patch)$/i.test(normalized)) return "Preparing the requested legal document and checking its structure…";
+	if (/skill/i.test(normalized)) return "Applying the relevant legal work guidance to this request…";
+	return "Completing the next safe step for your legal request…";
+}
+
+export function safeFailureProgress(toolName) {
+	const normalized = normalisedToolName(toolName);
+	if (normalized === "web_search_public_legal_sources") return "I couldn’t complete one current-source check. I’m assessing another reliable legal source before continuing…";
+	if (["rag_chat_research", "legal_source_retrieve_details"].includes(normalized)) return "I couldn’t complete one legal-source check. I’m assessing the available authorities before deciding the next step…";
+	if (["review_prepare_document_set", "review_record_checkpoint_outcome", "review_finalize_document"].includes(normalized)) return "I couldn’t complete one review-processing step as expected. I’m checking the source material before continuing…";
+	if (["workbench_publish_artifact", "librechat_prepare_document_preview"].includes(normalized)) return "I couldn’t complete one file-preparation step as expected. I’m checking a safe alternative before continuing…";
+	if (/^(bash|shell|terminal|exec|run_command|write|edit|create_file|apply_patch)$/i.test(normalized)) return "I couldn’t complete one document-preparation step as expected. I’m checking a safe alternative before continuing…";
+	if (/translator/i.test(normalized)) return "I couldn’t complete the translation step as expected. I’m checking the source material before deciding the next step…";
+	return "I couldn’t complete one step as expected. I’m assessing the safest next step before continuing…";
+}
+
+export function createThoughtReporter(onProgress) {
+	let last = "";
+	return (message) => {
+		if (!message || message === last) return false;
+		last = message;
+		onProgress(message);
+		return true;
+	};
+}
+
+function thoughtPhaseForTool(toolName, args = undefined) {
+	const normalized = normalisedToolName(toolName);
+	if (normalized === "legal_source_retrieve_details") return `legal_source:${safeOperation(args) || "retrieve"}`;
+	if (/^(bash|shell|terminal|exec|run_command|write|edit|create_file|apply_patch)$/i.test(normalized)) return "document_preparation";
+	if (/^(read|read_file|list|find|glob|grep|search_files)$/i.test(normalized)) return "source_reading";
+	if (/skill/i.test(normalized)) return "legal_guidance";
+	return normalized || "safe_step";
+}
+
+function thoughtFailurePhase(toolName) {
+	const normalized = normalisedToolName(toolName);
+	if (/^(bash|shell|terminal|exec|run_command|write|edit|create_file|apply_patch)$/i.test(normalized)) return "recovery:document_preparation";
+	if (/^(read|read_file|list|find|glob|grep|search_files)$/i.test(normalized)) return "recovery:source_reading";
+	return `recovery:${thoughtPhaseForTool(normalized)}`;
+}
+
+function isDocumentPreparationTool(toolName) {
+	return /^(bash|shell|terminal|exec|run_command|write|edit|create_file|apply_patch)$/i.test(normalisedToolName(toolName));
+}
+
+function livenessThought(phase, milestone) {
+	const subject = phase.includes("document") ? "requested document" :
+		phase.includes("review") ? "legal review" :
+		phase.includes("translation") ? "translation" :
+		phase.includes("source") || phase === "rag_chat_research" || phase === "web_search_public_legal_sources" ? "legal-source check" :
+		"requested legal work";
+	if (milestone === 20_000) return `The ${subject} is still being prepared…`;
+	if (milestone === 60_000) return `The current ${subject} step is taking longer than usual; I’m continuing the required checks…`;
+	return `Still working on the ${subject} and waiting for this preparation step to finish…`;
+}
+
+// Pi can generate several low-level events for one logical task (for example,
+// read -> write -> shell conversion -> retry). LibreChat should describe the
+// user-visible phase once, rather than narrate every implementation detail.
+// This controller deliberately knows only a closed vocabulary of phases and
+// never reads tool arguments, outputs, paths, command text, or error details.
+export function createThoughtController(onProgress, { now = () => Date.now() } = {}) {
+	const report = createThoughtReporter(onProgress);
+	const emittedPhases = new Set();
+	const livenessMilestones = [20_000, 60_000, 120_000];
+	let activePhase = "planning";
+	let activeSince = now();
+	let emittedLiveness = new Set();
+	let failedDocumentTool = "";
+
+	function activate(phase) {
+		activePhase = phase;
+		activeSince = now();
+		emittedLiveness = new Set();
+	}
+
+	return {
+		handle(event = {}) {
+			if (event.type === "agent_start") {
+				activate("planning");
+				if (emittedPhases.has("planning")) return false;
+				emittedPhases.add("planning");
+				return report("I’m reviewing your request and planning the legal work…");
+			}
+
+			const tool = event.toolName || event.tool_name;
+			if (event.type === "tool_execution_start") {
+				const normalized = normalisedToolName(tool);
+				if (failedDocumentTool && isDocumentPreparationTool(normalized) && normalized !== failedDocumentTool) {
+					failedDocumentTool = "";
+					activate("document_recovery");
+					if (emittedPhases.has("document_recovery")) return false;
+					emittedPhases.add("document_recovery");
+					return report("Trying a compatible document-generation method…");
+				}
+				const phase = thoughtPhaseForTool(normalized, event.args);
+				activate(phase);
+				if (emittedPhases.has(phase)) return false;
+				emittedPhases.add(phase);
+				return report(safeProgressName(tool, event.args));
+			}
+
+			if (event.type === "tool_execution_end" && event.isError) {
+				const phase = thoughtFailurePhase(tool);
+				if (isDocumentPreparationTool(tool)) failedDocumentTool = normalisedToolName(tool);
+				activate(phase);
+				if (emittedPhases.has(phase)) return false;
+				emittedPhases.add(phase);
+				return report(safeFailureProgress(tool));
+			}
+			return false;
+		},
+		tick() {
+			const elapsed = now() - activeSince;
+			const milestone = livenessMilestones.find((value) => elapsed >= value && !emittedLiveness.has(value));
+			if (!milestone) return false;
+			emittedLiveness.add(milestone);
+			return report(livenessThought(activePhase, milestone));
+		},
+	};
+}
+
+export function safeThoughtForPiEvent(event = {}) {
+	if (event.type === "agent_start") return "I’m reviewing your request and planning the legal work…";
+	const tool = event.toolName || event.tool_name;
+	if (event.type === "tool_execution_start") return safeProgressName(tool, event.args);
+	if (event.type === "tool_execution_end" && event.isError) return safeFailureProgress(tool);
+	return undefined;
 }
 
 function safeAuditToolName(toolName) {
 	const raw = String(toolName || "unknown");
-	return Object.keys(safeToolProgress).find((name) => raw === name || raw.endsWith(`__${name}`)) ||
+	const normalized = normalisedToolName(raw);
+	return (knownToolNames.has(normalized) ? normalized : undefined) ||
 		(/^(bash|shell|terminal|exec|run_command)$/i.test(raw) ? "builtin_command" :
 			/^(read|read_file|list|find|glob|grep|search_files)$/i.test(raw) ? "builtin_read" :
 			/^(write|edit|create_file|apply_patch)$/i.test(raw) ? "builtin_write" : "builtin_or_unrecognized");
@@ -289,8 +443,13 @@ async function runPi(prompt, sessionId, onProgress) {
 	await mkdir(SESSION_ROOT, { recursive: true });
 	const sessionSizesBefore = await sessionFileSizes();
 	const startedAt = Date.now();
+	const thoughtController = createThoughtController(onProgress);
 	return new Promise((resolve, reject) => {
 		const child = spawn(process.execPath, args, { cwd: projectRoot, env: agentEnvironment(), stdio: ["ignore", "pipe", "pipe"] });
+		// The service-level SSE keepalive is intentionally invisible. This bounded
+		// timer is different: it tells the user that Pi is still alive when a
+		// legitimate document or research step produces no lifecycle event.
+		const thoughtLivenessTimer = setInterval(() => thoughtController.tick(), 5_000);
 		let buffer = "";
 		let stderr = "";
 		let finalText = "";
@@ -314,10 +473,9 @@ async function runPi(prompt, sessionId, onProgress) {
 						recordAssistantUsage({ ...event.assistantMessageEvent.message, usage: event.usage });
 					}
 					if (event.type === "message_end" && event.message?.role === "custom" && event.message?.customType === "junior-silva-scope" && typeof event.message?.content === "string") finalText = event.message.content;
-					if (event.type === "agent_start") onProgress("Pi is planning the requested legal work…");
+					thoughtController.handle(event);
 					if (event.type === "tool_execution_start") {
 						const tool = event.toolName || event.tool_name;
-						onProgress(safeProgressName(tool));
 						void audit(sessionId, { type: "tool", tool: safeAuditToolName(tool), status: "started" }).catch(() => {});
 					}
 					// Never relay update payloads: built-in tools can include shell output,
@@ -325,7 +483,6 @@ async function runPi(prompt, sessionId, onProgress) {
 					if (event.type === "tool_execution_end") {
 						const tool = event.toolName || event.tool_name;
 						void audit(sessionId, { type: "tool", tool: safeAuditToolName(tool), status: event.isError ? "error" : "completed" }).catch(() => {});
-						if (event.isError) onProgress("A specialist tool reported a problem; Pi is deciding the next safe step…");
 					}
 					if (event.type === "message" && event.message?.role === "assistant") recordAssistantUsage(event.message);
 					if (event.type === "message_end" && event.message?.role === "assistant") {
@@ -336,10 +493,11 @@ async function runPi(prompt, sessionId, onProgress) {
 			}
 		});
 		child.stderr.on("data", (chunk) => { stderr = `${stderr}${chunk.toString()}`.slice(-12_000); });
-		const timeout = setTimeout(() => { child.kill("SIGTERM"); reject(new Error("Pi request timed out")); }, Number(env("JUNIOR_SILVA_PI_TIMEOUT_MS", "1200000")));
-		child.on("error", (error) => { clearTimeout(timeout); reject(error); });
+		const timeout = setTimeout(() => { clearInterval(thoughtLivenessTimer); child.kill("SIGTERM"); reject(new Error("Pi request timed out")); }, Number(env("JUNIOR_SILVA_PI_TIMEOUT_MS", "1200000")));
+		child.on("error", (error) => { clearTimeout(timeout); clearInterval(thoughtLivenessTimer); reject(error); });
 		child.on("close", (code) => {
 			clearTimeout(timeout);
+			clearInterval(thoughtLivenessTimer);
 			if (code !== 0) return reject(new Error(`Pi exited with code ${code}: ${stderr.replace(/\s+/g, " ").slice(0, 1200)}`));
 			if (!finalText.trim()) return reject(new Error("Pi returned no final answer"));
 			void appendedSessionUsage(sessionSizesBefore).then((persistedUsage) => {
