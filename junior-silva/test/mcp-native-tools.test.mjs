@@ -62,11 +62,11 @@ test("MCP keeps review HTML in structured content and gives Pi compact download 
 	assert.doesNotMatch(text, /artifact_markup|local_path|file_uri|<p>review<\/p>/);
 });
 
-test("MCP directs simple judge and year case lists to the structured direct catalogue operation", () => {
+test("MCP directs indexed-value discovery and case catalogues to the structured direct source tool", () => {
 	const tool = mcpTools.find((candidate) => candidate.name === "legal_source_retrieve_details");
 	assert.ok(tool);
 	assert.ok(tool.description.includes("case_catalog"));
-	assert.ok(tool.description.includes("judge"));
-	for (const operation of ["case_catalog", "amendment_catalog", "capabilities"]) assert.ok(tool.inputSchema.properties.operation.enum.includes(operation), operation);
-	for (const property of ["subject_query", "judge_name", "decision_year", "decision_month", "court", "report", "report_year", "volume_num", "page_num", "action_type", "amendment_year", "page", "page_size"]) assert.ok(tool.inputSchema.properties[property], property);
+	assert.ok(tool.description.includes("facet_values"));
+	for (const operation of ["case_catalog", "facet_values", "amendment_catalog", "capabilities"]) assert.ok(tool.inputSchema.properties.operation.enum.includes(operation), operation);
+	for (const property of ["subject_query", "judge_name", "judge_labels", "facet_field", "facet_query", "decision_year", "decision_month", "court", "report", "report_year", "volume_num", "page_num", "action_type", "amendment_year", "page", "page_size"]) assert.ok(tool.inputSchema.properties[property], property);
 });
