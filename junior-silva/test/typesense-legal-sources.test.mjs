@@ -83,6 +83,65 @@ test("case catalogue resolves a unique minor judge spelling variant without aski
 	}
 });
 
+test("facet value discovery returns every targeted indexed judge label rather than a global top-facet sample", async () => {
+	const originalFetch = globalThis.fetch;
+	const previous = Object.fromEntries(["JUNIOR_TYPESENSE_ENABLED", "JUNIOR_TYPESENSE_DECISION_HOST", "JUNIOR_TYPESENSE_DECISION_API_KEY"].map((key) => [key, process.env[key]]));
+	process.env.JUNIOR_TYPESENSE_ENABLED = "true";
+	process.env.JUNIOR_TYPESENSE_DECISION_HOST = "decisions.example.test";
+	process.env.JUNIOR_TYPESENSE_DECISION_API_KEY = "test-key";
+	const requests = [];
+	globalThis.fetch = async (input) => {
+		const url = new URL(String(input));
+		requests.push(url);
+		return new Response(JSON.stringify({ facet_counts: [{ field_name: "judge_final", counts: [
+			{ value: "Weeramantry, J.", count: 51 },
+			{ value: "Christopher Weeramantry, J.", count: 14 },
+		] }] }), { status: 200 });
+	};
+	try {
+		const result = await retrieveLegalSourceDetails({ source: "case_decision", operation: "facet_values", facet_field: "judge_name", facet_query: "Weeramantry" });
+		assert.equal(requests.length, 1);
+		assert.equal(requests[0].searchParams.get("facet_by"), "judge_final");
+		assert.equal(requests[0].searchParams.get("facet_query"), "judge_final:Weeramantry");
+		assert.deepEqual(result.values, [{ value: "Weeramantry, J.", count: 51 }, { value: "Christopher Weeramantry, J.", count: 14 }]);
+		assert.equal(result.possibly_truncated, false);
+	} finally {
+		globalThis.fetch = originalFetch;
+		for (const [key, value] of Object.entries(previous)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
+	}
+});
+
+test("case catalogue requires a selection for an incomplete judge name and accepts an explicit returned label set", async () => {
+	const originalFetch = globalThis.fetch;
+	const previous = Object.fromEntries(["JUNIOR_TYPESENSE_ENABLED", "JUNIOR_TYPESENSE_DECISION_HOST", "JUNIOR_TYPESENSE_DECISION_API_KEY"].map((key) => [key, process.env[key]]));
+	process.env.JUNIOR_TYPESENSE_ENABLED = "true";
+	process.env.JUNIOR_TYPESENSE_DECISION_HOST = "decisions.example.test";
+	process.env.JUNIOR_TYPESENSE_DECISION_API_KEY = "test-key";
+	const requests = [];
+	globalThis.fetch = async (input) => {
+		const url = new URL(String(input));
+		requests.push(url);
+		if (url.searchParams.get("facet_by") === "judge_final") return new Response(JSON.stringify({ facet_counts: [{ field_name: "judge_final", counts: [
+			{ value: "Weeramantry, J.", count: 51 },
+			{ value: "Christopher Weeramantry, J.", count: 14 },
+		] }] }), { status: 200 });
+		return new Response(JSON.stringify({ found: 65, hits: [] }), { status: 200 });
+	};
+	try {
+		const ambiguous = await retrieveLegalSourceDetails({ source: "case_decision", operation: "case_catalog", judge_name: "Weeramantry" });
+		assert.equal(ambiguous.judge_resolution.status, "needs_selection");
+		assert.equal(ambiguous.judge_resolution.candidates.length, 2);
+
+		const selected = await retrieveLegalSourceDetails({ source: "case_decision", operation: "case_catalog", judge_labels: ["Weeramantry, J.", "Christopher Weeramantry, J."] });
+		assert.equal(selected.found, 65);
+		assert.deepEqual(selected.applied_filters.judge_final, ["Weeramantry, J.", "Christopher Weeramantry, J."]);
+		assert.match(requests.at(-1).searchParams.get("filter_by"), /judge_final:=\[`Weeramantry, J\.`, `Christopher Weeramantry, J\.`\]/);
+	} finally {
+		globalThis.fetch = originalFetch;
+		for (const [key, value] of Object.entries(previous)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
+	}
+});
+
 test("legislation section discovery falls back to authoritative Act discovery when Lex interactive search is restricted", async () => {
 	const originalFetch = globalThis.fetch;
 	const oldUrl = process.env.JUNIOR_LEX_LEGISLATION_API_URL;

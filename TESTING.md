@@ -55,6 +55,7 @@ Before the broader suite, verify review interaction behavior for a substantive p
 
 - For “tax cases decided by Judge Mahinda Samayawardhena in 2026,” confirm Pi calls `legal_source_retrieve_details` with `operation: case_catalog`, not `rag_chat_research`. The trace should show exact judge resolution, a 2026 filter, a tax subject query, paginated case metadata, and source links.
 - For a misspelled or ambiguous judge name, confirm the direct tool returns bounded candidate names and Pi asks for clarification rather than selecting a judge.
+- For “what variants of Judge X's name exist in the judgment collection?”, confirm Pi calls `facet_values` first and returns every matching indexed label/count. For a surname that matches multiple labels, confirm a later case request asks for a selection or explicitly searches the returned label set; it must not silently choose the highest-count label.
 - For “What legal principles emerge from those tax cases?”, confirm Pi retrieves selected case details and uses `rag_chat_research` for the resulting analysis rather than treating the catalogue alone as a legal conclusion.
 - First obtain a normal Sri Lankan legal answer through `rag_chat_research`; confirm RAG remains the primary synthesis and citation tool where the user asks for analysis.
 - When more detail about a cited authority is necessary, use `legal_source_retrieve_details` to find a known case and then retrieve bounded `decision_text` with its original link.
