@@ -7,7 +7,9 @@ import { appendFile, mkdir, readFile, readdir, stat, writeFile } from "node:fs/p
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { artifactsRoot, env, projectRoot, requiredEnv, uploadsRoot, workspaceRoot } from "../core/environment.mjs";
-import { mimeType, resolveArtifactRequest, safeFilename } from "../core/files.mjs";
+import { mimeType, publishWorkspaceArtifact, resolveArtifactRequest, safeFilename } from "../core/files.mjs";
+import { newestRequestedArtifact, requestedSlideCount } from "../core/artifact-delivery.mjs";
+import { preparePreview } from "../core/previews.mjs";
 import { dispatchMcpRequest } from "../mcp/server.mjs";
 import { addAssistantUsage, createUsageTotals, openAiUsage, requestsStreamUsage } from "./usage.mjs";
 
@@ -156,9 +158,10 @@ async function conversationUploadPaths(key) {
 	}
 }
 
-function piPrompt(instruction, files) {
-	if (!files.length) return instruction;
-	return `The user supplied these local document files with this request:\n${files.map((item) => `- ${item}`).join("\n")}\n\nUser request:\n${instruction || "Examine the supplied legal documents and respond appropriately."}`;
+function piPrompt(instruction, files, requestWorkspace) {
+	const workspace = `Use this request-only workspace for every file you create: ${requestWorkspace}. Do not read, write, or publish files from any other workspace directory.`;
+	if (!files.length) return `${workspace}\n\nUser request:\n${instruction}`;
+	return `${workspace}\n\nThe user supplied these local document files with this request:\n${files.map((item) => `- ${item}`).join("\n")}\n\nUser request:\n${instruction || "Examine the supplied legal documents and respond appropriately."}`;
 }
 
 const safeToolProgress = Object.freeze({
@@ -196,7 +199,7 @@ function safeAuditToolName(toolName) {
 			/^(write|edit|create_file|apply_patch)$/i.test(raw) ? "builtin_write" : "builtin_or_unrecognized");
 }
 
-function agentEnvironment() {
+function agentEnvironment(requestWorkspace = workspaceRoot) {
 	const output = {
 		PATH: process.env.PATH || "",
 		HOME: process.env.HOME || "",
@@ -210,7 +213,7 @@ function agentEnvironment() {
 		JUNIOR_SILVA_DATA_ROOT: path.dirname(artifactsRoot),
 		JUNIOR_SILVA_ARTIFACT_ROOT: artifactsRoot,
 		JUNIOR_SILVA_UPLOAD_ROOT: uploadsRoot,
-		JUNIOR_SILVA_WORKSPACE_ROOT: workspaceRoot,
+		JUNIOR_SILVA_WORKSPACE_ROOT: requestWorkspace,
 	};
 	const provider = env("PI_PROVIDER", "google");
 	if (provider === "anthropic" && process.env.ANTHROPIC_API_KEY) output.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -269,7 +272,7 @@ async function appendedSessionUsage(sizesBefore) {
 	return changedFiles === 1 ? totals : undefined;
 }
 
-async function runPi(prompt, sessionId, onProgress) {
+async function runPi(prompt, sessionId, onProgress, requestWorkspace = workspaceRoot) {
 	// Hosted Pi uses administrator-owned legal MCP registration. Its normal built-in
 	// tools remain subject to the legal-scope extension and deployment sandbox.
 	const args = [
@@ -290,10 +293,11 @@ async function runPi(prompt, sessionId, onProgress) {
 	const sessionSizesBefore = await sessionFileSizes();
 	const startedAt = Date.now();
 	return new Promise((resolve, reject) => {
-		const child = spawn(process.execPath, args, { cwd: projectRoot, env: agentEnvironment(), stdio: ["ignore", "pipe", "pipe"] });
+		const child = spawn(process.execPath, args, { cwd: projectRoot, env: agentEnvironment(requestWorkspace), stdio: ["ignore", "pipe", "pipe"] });
 		let buffer = "";
 		let stderr = "";
 		let finalText = "";
+		let artifactPublished = false;
 		const usageTotals = createUsageTotals();
 		const usageResponseIds = new Set();
 		const recordAssistantUsage = (message) => {
@@ -324,6 +328,7 @@ async function runPi(prompt, sessionId, onProgress) {
 					// files, URLs, source text, credentials, or internal service responses.
 					if (event.type === "tool_execution_end") {
 						const tool = event.toolName || event.tool_name;
+						if (!event.isError && /(?:^|__|\/)workbench_publish_artifact$/.test(String(tool || ""))) artifactPublished = true;
 						void audit(sessionId, { type: "tool", tool: safeAuditToolName(tool), status: event.isError ? "error" : "completed" }).catch(() => {});
 						if (event.isError) onProgress("A specialist tool reported a problem; Pi is deciding the next safe step…");
 					}
@@ -343,10 +348,46 @@ async function runPi(prompt, sessionId, onProgress) {
 			if (code !== 0) return reject(new Error(`Pi exited with code ${code}: ${stderr.replace(/\s+/g, " ").slice(0, 1200)}`));
 			if (!finalText.trim()) return reject(new Error("Pi returned no final answer"));
 			void appendedSessionUsage(sessionSizesBefore).then((persistedUsage) => {
-				resolve({ answer: finalText.trim(), usage: openAiUsage(persistedUsage) || openAiUsage(usageTotals), elapsedMs: Date.now() - startedAt });
+				resolve({ answer: finalText.trim(), usage: openAiUsage(persistedUsage) || openAiUsage(usageTotals), elapsedMs: Date.now() - startedAt, artifactPublished });
 			}).catch(reject);
 		});
 	});
+}
+
+function artifactDeliveryText(publication) {
+	const url = publication?.artifact?.download_url;
+	if (typeof url !== "string" || !/^https?:\/\//i.test(url)) throw new Error("Published artifact did not provide a download URL");
+	const markup = typeof publication.artifact_markup === "string" && publication.artifact_markup.startsWith(":::artifact{") ? publication.artifact_markup : "";
+	return ["The requested legal work product is ready.", `## Files\n\n- [Download completed file](${url})`, markup].filter(Boolean).join("\n\n");
+}
+
+async function recoverUndeliveredArtifact({ instruction, requestWorkspace, sessionId, initial, onProgress }) {
+	if (initial.artifactPublished) return initial;
+	let candidate = await newestRequestedArtifact(requestWorkspace, instruction);
+	if (!candidate) return initial;
+
+	// Give Pi one bounded opportunity to finish its own validation/repair and call
+	// the normal publishing tool. It stays inside the request workspace and does
+	// not repeat research simply because delivery was omitted.
+	onProgress("Checking the generated file before delivery…");
+	const repair = await runPi(
+		`A requested deliverable exists in this request workspace but has not been delivered. Inspect only ${candidate}. If it needs correction, correct and validate it. Then call workbench_publish_artifact for the final file and finish with a concise delivery confirmation. Do not repeat legal research or return an internal progress note.`,
+		sessionId,
+		onProgress,
+		requestWorkspace,
+	).catch(() => undefined);
+	if (repair?.artifactPublished) return repair;
+
+	// Pi created a valid file but omitted the final tool call. Publish only a file
+	// from this request's private workspace; never guess from a shared workspace.
+	candidate = await newestRequestedArtifact(requestWorkspace, instruction);
+	if (!candidate) return initial;
+	onProgress("Preparing the completed file for secure download…");
+	const preview = await preparePreview(candidate);
+	const slides = requestedSlideCount(instruction);
+	if (slides && path.extname(candidate).toLowerCase() === ".pptx" && !new RegExp(`>${slides} slides?\\.`).test(preview.markup)) return initial;
+	const publication = await publishWorkspaceArtifact(candidate);
+	return { ...initial, answer: artifactDeliveryText(publication), artifactPublished: true, recoveredArtifact: true };
 }
 
 const queues = new Map();
@@ -428,8 +469,14 @@ const server = createServer(async (req, res) => {
 			const id = `chatcmpl-${randomUUID()}`;
 			const streaming = body.stream !== false;
 			const includeStreamUsage = requestsStreamUsage(body);
+			const requestWorkspace = path.join(workspaceRoot, "requests", key, id);
+			await mkdir(requestWorkspace, { recursive: true });
 			if (streaming) { startStream(res, id); heartbeat = setInterval(() => res.write(": keep-alive\n\n"), 15_000); }
-			const result = await serial(key, () => runPi(piPrompt(uploadText.instruction, files), `junior-silva-v2-${key}`, (message) => { if (streaming) streamDelta(res, id, "reasoning_content", `${message}\n`); }));
+			const onProgress = (message) => { if (streaming) streamDelta(res, id, "reasoning_content", `${message}\n`); };
+			const result = await serial(key, async () => {
+				const initial = await runPi(piPrompt(uploadText.instruction, files, requestWorkspace), `junior-silva-v2-${key}`, onProgress, requestWorkspace);
+				return recoverUndeliveredArtifact({ instruction: uploadText.instruction, requestWorkspace, sessionId: `junior-silva-v2-${key}`, initial, onProgress });
+			});
 			if (heartbeat) clearInterval(heartbeat);
 			if (streaming) return finishStream(res, id, result.answer, includeStreamUsage ? result.usage : undefined);
 			return json(res, 200, { id, object: "chat.completion", created: Math.floor(Date.now() / 1000), model: MODEL, choices: [{ index: 0, message: { role: "assistant", content: result.answer }, finish_reason: "stop" }], ...(result.usage ? { usage: result.usage } : {}) });

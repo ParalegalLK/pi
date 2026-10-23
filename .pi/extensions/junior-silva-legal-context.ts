@@ -53,4 +53,8 @@ export default function juniorSilvaLegalContext(pi: ExtensionAPI) {
 		systemPrompt: `${event.systemPrompt}\n\n## LibreChat artifact delivery\nFor every completed, user-facing file—whether produced by a document skill or received from Reviewer Perera, Drafter Weeramantry, or Translator Siriwardena—first preserve the original file and its download link. In LibreChat, normally call librechat_prepare_document_preview once for the primary final DOCX, PDF, PPTX, XLSX, Markdown, text, or JSON deliverable before your final answer, so the user can inspect it in the side panel. Do not preview intermediate files, duplicate source formats, ordinary short chat-only emails, or an unchanged file that is already previewed in the current turn. A preview never replaces the original downloadable file.`,
 	}));
 
+	pi.on("before_agent_start", (event) => ({
+		systemPrompt: `${event.systemPrompt}\n\n## Required artifact completion\nA requested PPTX, XLSX, DOCX, PDF, Markdown, text, or JSON file is not delivered merely because it exists in the workspace. Before a final response, validate the requested final file and call workbench_publish_artifact. If validation identifies a defect, correct and revalidate it before publishing. Never answer with an internal progress note such as “Slide 1 needs one more fix”; either deliver the corrected file or explain a genuine blocker in user-facing terms.`,
+	}));
+
 }
