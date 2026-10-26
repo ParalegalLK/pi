@@ -195,8 +195,9 @@ function canonicalRequestedValue(field, requested) {
 
 function rankedCandidates(values, requested, field) {
 	const canonical = canonicalRequestedValue(field, requested);
+	const canonicalField = ["sc_or_ca", "decision_month"].includes(field);
 	return values
-		.map((candidate) => ({ ...candidate, score: similarity(canonical, field === "sc_or_ca" ? canonicalRequestedValue(field, candidate.value) : candidate.value) }))
+		.map((candidate) => ({ ...candidate, score: similarity(canonical, canonicalField ? canonicalRequestedValue(field, candidate.value) : candidate.value) }))
 		.filter((candidate) => candidate.score >= 0.45)
 		.sort((left, right) => right.score - left.score || right.count - left.count || left.value.localeCompare(right.value))
 		.slice(0, 12);
@@ -278,8 +279,23 @@ function facetParameters(config, args, facetKey, resolutions, { query } = {}) {
 async function resolveFacet(config, args, key, resolutions) {
 	if (args[key] === undefined || args[key] === null || args[key] === "") return { status: "not_requested" };
 	const descriptor = config.definition.filterFields[key];
-	const payload = await fetchTypesense(config, facetParameters(config, args, key, resolutions, { query: args[key] }));
-	const values = facetValues(payload, descriptor.field);
+	// Typesense facet queries match the indexed literal.  A user naturally says
+	// “Supreme Court” while this collection may store `SC`, and months are often
+	// stored as numbers.  Search the original wording and its safe canonical
+	// alias, then resolve only from actual indexed facet values.
+	const requested = String(args[key]).trim();
+	const canonical = canonicalRequestedValue(descriptor.field, requested);
+	const alternate = ["sc_or_ca", "decision_month"].includes(descriptor.field) ? canonical : requested;
+	const queries = [...new Set([requested, alternate].filter(Boolean))];
+	const valuesByLabel = new Map();
+	for (const query of queries) {
+		const payload = await fetchTypesense(config, facetParameters(config, args, key, resolutions, { query }));
+		for (const value of facetValues(payload, descriptor.field)) {
+			const existing = valuesByLabel.get(value.value);
+			if (!existing || value.count > existing.count) valuesByLabel.set(value.value, value);
+		}
+	}
+	const values = [...valuesByLabel.values()];
 	const resolution = confidentResolution(descriptor.field, args[key], values);
 	if (key !== "judge_name" || resolution.status !== "resolved" || words(args[key]).length > 1) return resolution;
 	const candidates = rankedCandidates(values, args[key], descriptor.field);
@@ -448,14 +464,18 @@ async function retrieveCaseCatalogue(config, args, maximum, onProgress) {
 	const catalogue = catalogParameters(config, args, fields, resolutions);
 	const payload = await fetchTypesense(config, catalogue.params);
 	const found = Number(payload.found || 0);
+	const records = (payload.hits || []).map((hit) => normalizeRecord(hit.document || {}, fields, Math.min(maximum, MAX_CATALOG_FIELD_CHARS)));
 	return {
 		source: args.source,
 		source_label: config.definition.label,
 		operation: "case_catalog",
 		found,
+		returned: records.length,
 		page: catalogue.page,
 		page_size: catalogue.pageSize,
+		total_pages: Math.max(1, Math.ceil(found / catalogue.pageSize)),
 		has_more: catalogue.page * catalogue.pageSize < found,
+		next_page: catalogue.page * catalogue.pageSize < found ? catalogue.page + 1 : undefined,
 		filter_resolution: resolutions,
 		judge_resolution: resolutions.judge_name,
 		applied_filters: {
@@ -472,8 +492,8 @@ async function retrieveCaseCatalogue(config, args, maximum, onProgress) {
 		},
 		requested_fields: fields,
 		available_fields: config.definition.fields,
-		records: (payload.hits || []).map((hit) => normalizeRecord(hit.document || {}, fields, Math.min(maximum, MAX_CATALOG_FIELD_CHARS))),
-		guidance: "These are indexed case-catalogue matches, not a legal conclusion or a complete court registry. Preserve returned case links. Retrieve bounded decision detail for selected cases before describing a holding; use RAG Chat when the user asks for legal analysis or synthesis. When judge_final contains multiple labels, keep the results grouped or clearly state that the catalogue searched their union.",
+		records,
+		guidance: "These are indexed case-catalogue matches, not a legal conclusion or a complete court registry. For an unqualified request to list cases, present every returned record and fetch next_page until has_more is false; do not present a selected sample as the complete list. Preserve returned case links. Retrieve bounded decision detail for selected cases before describing a holding; use RAG Chat when the user asks for legal analysis or synthesis. When judge_final contains multiple labels, keep the results grouped or clearly state that the catalogue searched their union.",
 	};
 }
 
