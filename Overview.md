@@ -13,6 +13,7 @@ The current deployment branch is **feat/deployment-test**. The upstream Pi base 
 - **Localize service artifacts.** Provider download links are never shown as user-facing links. Returned files are downloaded to controlled artifact folders and exposed through HMAC-protected download URLs.
 - **Preserve sources.** Direct RAG research is delivered verbatim. In composite work, known RAG authority links are restored where the final text retains the associated authority.
 - **The original file remains authoritative.** LibreChat previews are read-only derived views; they never alter DOCX, PDF, PPTX, XLSX, Markdown, or other source artifacts.
+- **Stateful document delivery.** Pi retains one session and private document library per LibreChat user-conversation. New attachments are localized once; earlier attachments are not replayed, re-downloaded or re-listed in every later Pi prompt.
 
 ## Runtime architecture
 
@@ -52,6 +53,12 @@ LibreChat custom endpoint│ legal scope + chronology extension      │
 | junior-silva/mcp/server.mjs | Standards-compliant stdio MCP server exposing specialist tools. |
 
 The HTTP endpoint provides /health, /v1/models, /v1/chat/completions, and protected artifact-download routes. It serializes a conversation key so related turns do not race each other, translates MCP progress into SSE reasoning_content, and persists Pi sessions beneath the configured data root.
+
+### LibreChat conversation and attachment handling
+
+LibreChat sends a standard history-bearing OpenAI request, while Junior Silva V2 derives an HMAC-isolated key from the LibreChat user and conversation headers and reuses `junior-silva-v2-<key>` as Pi's session ID. The deployment's `junior-silva-v2` agent preset sets `resendFiles: false`: only attachments added on the current turn are delivered by LibreChat, but ordinary text conversation history remains available to LibreChat.
+
+`server/openai.mjs` deliberately uses the latest user message only when discovering provider attachments and Upload-as-Text envelopes. It stores a conversation-local `.manifest.json` alongside uploads, keyed by source file ID when supplied and by SHA-256 bytes in all cases. A previously retained document is not downloaded or copied again; a same-name replacement with different bytes becomes a distinct retained document. Pi receives only the newly introduced paths for a turn. It retains the earlier paths in its durable session, so it can re-read a prior agreement or supporting document when needed without the bridge blindly reinjecting all documents.
 
 ## Full Junior Silva V2 file structure
 
@@ -99,7 +106,7 @@ pi/
 │   │   ├── render_review_docx.py            source-anchored DOCX comments/highlights renderer
 │   │   └── render_review_docx.ps1           Windows/WSL renderer wrapper
 │   ├── server/
-│   │   └── openai.mjs                       OpenAI-compatible LibreChat bridge and SSE progress
+│   │   └── openai.mjs                       OpenAI bridge, HMAC conversation sessions, upload manifest/deduplication and SSE progress
 │   ├── services/
 │   │   ├── code-runner.mjs                  isolated JSON-only JavaScript transformation runner
 │   │   ├── drafter.mjs                      legacy adapter retained temporarily; not exposed by production MCP
@@ -110,6 +117,7 @@ pi/
 │   │   └── web.mjs                          Serper legal-news/current-law search
 │   └── test/
 │       ├── files.test.mjs                   artifact/input safety tests
+│       ├── openai-uploads.test.mjs           current-turn upload, history suppression and deduplication tests
 │       ├── legal-research.test.mjs          linked-authority delivery tests
 │       ├── mcp-native-tools.test.mjs         native review/drafting MCP contract tests
 │       ├── native-review.test.mjs            document-set, anchors and review rendering tests
