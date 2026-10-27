@@ -10,6 +10,7 @@ const args = [
 	"--extension", path.join(projectRoot, ".pi", "extensions", "junior-silva-scope-guard.ts"),
 	"--extension", path.join(projectRoot, ".pi", "extensions", "legal-research-citation-delivery.ts"),
 	"--extension", path.join(projectRoot, ".pi", "extensions", "librechat-preview-delivery.ts"),
+	"--extension", path.join(projectRoot, ".pi", "extensions", "junior-silva-local-trace.ts"),
 ];
 if (env("PI_PROVIDER")) args.push("--provider", env("PI_PROVIDER"));
 if (env("PI_MODEL")) args.push("--model", env("PI_MODEL"));

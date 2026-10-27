@@ -6,10 +6,12 @@ import { existsSync } from "node:fs";
 import { appendFile, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import codingAgentPackage from "../../packages/coding-agent/package.json" with { type: "json" };
 import { artifactsRoot, env, projectRoot, requiredEnv, uploadsRoot, workspaceRoot } from "../core/environment.mjs";
 import { mimeType, publishWorkspaceArtifact, resolveArtifactRequest, safeFilename } from "../core/files.mjs";
 import { newestRequestedArtifact, requestedSlideCount } from "../core/artifact-delivery.mjs";
 import { preparePreview } from "../core/previews.mjs";
+import { createRequestTrace } from "../core/trace.mjs";
 import { dispatchMcpRequest } from "../mcp/server.mjs";
 import { addAssistantUsage, createUsageTotals, openAiUsage, requestsStreamUsage } from "./usage.mjs";
 
@@ -22,6 +24,7 @@ const MAX_FILE = Number(env("JUNIOR_SILVA_MAX_FILE_BYTES", String(50 * 1024 * 10
 const SESSION_ROOT = path.join(path.dirname(artifactsRoot), "sessions");
 const AGENT_ROOT = path.resolve(env("PI_CODING_AGENT_DIR", path.join(path.dirname(artifactsRoot), "pi-agent")));
 const PI_CLI = path.join(projectRoot, "packages", "coding-agent", "dist", "bundle", "cli.js");
+const PI_VERSION = codingAgentPackage.version;
 const ATTACHMENT_ORIGINS = new Set(env("JUNIOR_SILVA_ATTACHMENT_ORIGINS").split(",").map((item) => item.trim()).filter(Boolean));
 const auditRoot = path.join(path.dirname(artifactsRoot), "audit");
 
@@ -199,6 +202,24 @@ async function saveUploads(key, candidates, extracted) {
 	}
 	await writeFile(uploadManifestPath(directory), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
 	return paths;
+}
+
+async function describeUploads(key, paths, newPaths = paths) {
+	const directory = path.join(uploadsRoot, key);
+	const manifest = await loadUploadManifest(directory);
+	const byFilename = new Map(Object.entries(manifest.files).map(([sha256, entry]) => [entry.filename, { sha256, ...entry }]));
+	const newPathSet = new Set(newPaths);
+	return Promise.all(paths.map(async (file) => {
+		const details = byFilename.get(path.basename(file));
+		const info = await stat(file);
+		return {
+			original_name: details?.originalName || path.basename(file),
+			stored_path: file,
+			size_bytes: info.size,
+			sha256: details?.sha256,
+			new_this_request: newPathSet.has(file),
+		};
+	}));
 }
 
 async function conversationUploadPaths(key) {
@@ -480,7 +501,7 @@ async function appendedSessionUsage(sizesBefore) {
 	return changedFiles === 1 ? totals : undefined;
 }
 
-async function runPi(prompt, sessionId, onProgress, requestWorkspace = workspaceRoot) {
+async function runPi(prompt, sessionId, onProgress, requestWorkspace = workspaceRoot, trace, attempt = "initial") {
 	// Hosted Pi uses administrator-owned legal MCP registration. Its normal built-in
 	// tools remain subject to the legal-scope extension and deployment sandbox.
 	const args = [
@@ -500,6 +521,7 @@ async function runPi(prompt, sessionId, onProgress, requestWorkspace = workspace
 	await mkdir(SESSION_ROOT, { recursive: true });
 	const sessionSizesBefore = await sessionFileSizes();
 	const startedAt = Date.now();
+	trace?.attempt("started", { attempt, session_id: sessionId });
 	const thoughtController = createThoughtController(onProgress);
 	return new Promise((resolve, reject) => {
 		const child = spawn(process.execPath, args, { cwd: projectRoot, env: agentEnvironment(requestWorkspace), stdio: ["ignore", "pipe", "pipe"] });
@@ -527,6 +549,10 @@ async function runPi(prompt, sessionId, onProgress, requestWorkspace = workspace
 			for (const line of lines) {
 				try {
 					const event = JSON.parse(line);
+					if (event.type === "tool_execution_start") void trace?.toolStart(event);
+					if (event.type === "tool_execution_update") void trace?.toolUpdate(event);
+					if (event.type === "tool_execution_end") void trace?.toolEnd(event);
+					if (event.type === "message_end" && event.message?.role === "assistant") void trace?.assistantMessage(event.message);
 					if (event.type === "message_update" && event.assistantMessageEvent?.type === "message_end") {
 						recordAssistantUsage({ ...event.assistantMessageEvent.message, usage: event.usage });
 					}
@@ -552,15 +578,28 @@ async function runPi(prompt, sessionId, onProgress, requestWorkspace = workspace
 			}
 		});
 		child.stderr.on("data", (chunk) => { stderr = `${stderr}${chunk.toString()}`.slice(-12_000); });
-		const timeout = setTimeout(() => { clearInterval(thoughtLivenessTimer); child.kill("SIGTERM"); reject(new Error("Pi request timed out")); }, Number(env("JUNIOR_SILVA_PI_TIMEOUT_MS", "1200000")));
-		child.on("error", (error) => { clearTimeout(timeout); clearInterval(thoughtLivenessTimer); reject(error); });
+		const timeout = setTimeout(() => {
+			clearInterval(thoughtLivenessTimer);
+			child.kill("SIGTERM");
+			void trace?.attempt("error", { attempt, error: "Pi request timed out" });
+			reject(new Error("Pi request timed out"));
+		}, Number(env("JUNIOR_SILVA_PI_TIMEOUT_MS", "1200000")));
+		child.on("error", (error) => { clearTimeout(timeout); clearInterval(thoughtLivenessTimer); void trace?.attempt("error", { attempt, error: error?.message || String(error) }); reject(error); });
 		child.on("close", (code) => {
 			clearTimeout(timeout);
 			clearInterval(thoughtLivenessTimer);
-			if (code !== 0) return reject(new Error(`Pi exited with code ${code}: ${stderr.replace(/\s+/g, " ").slice(0, 1200)}`));
-			if (!finalText.trim()) return reject(new Error("Pi returned no final answer"));
+			if (code !== 0) {
+				void trace?.attempt("error", { attempt, exit_code: code, stderr });
+				return reject(new Error(`Pi exited with code ${code}: ${stderr.replace(/\s+/g, " ").slice(0, 1200)}`));
+			}
+			if (!finalText.trim()) {
+				void trace?.attempt("error", { attempt, error: "Pi returned no final answer" });
+				return reject(new Error("Pi returned no final answer"));
+			}
 			void appendedSessionUsage(sessionSizesBefore).then((persistedUsage) => {
-				resolve({ answer: finalText.trim(), usage: openAiUsage(persistedUsage) || openAiUsage(usageTotals), elapsedMs: Date.now() - startedAt, artifactPublished });
+				const result = { answer: finalText.trim(), usage: openAiUsage(persistedUsage) || openAiUsage(usageTotals), elapsedMs: Date.now() - startedAt, artifactPublished };
+				void trace?.attempt("completed", { attempt, elapsed_ms: result.elapsedMs, artifact_published: artifactPublished });
+				resolve(result);
 			}).catch(reject);
 		});
 	});
@@ -573,7 +612,7 @@ function artifactDeliveryText(publication) {
 	return ["The requested legal work product is ready.", `## Files\n\n- [Download completed file](${url})`, markup].filter(Boolean).join("\n\n");
 }
 
-async function recoverUndeliveredArtifact({ instruction, requestWorkspace, sessionId, initial, onProgress }) {
+async function recoverUndeliveredArtifact({ instruction, requestWorkspace, sessionId, initial, onProgress, trace }) {
 	if (initial.artifactPublished) return initial;
 	let candidate = await newestRequestedArtifact(requestWorkspace, instruction);
 	if (!candidate) return initial;
@@ -587,6 +626,8 @@ async function recoverUndeliveredArtifact({ instruction, requestWorkspace, sessi
 		sessionId,
 		onProgress,
 		requestWorkspace,
+		trace,
+		"artifact_recovery",
 	).catch(() => undefined);
 	if (repair?.artifactPublished) return repair;
 
@@ -655,9 +696,10 @@ await writeFile(path.join(AGENT_ROOT, "mcp.json"), `${JSON.stringify({
 }, null, 2)}\n`, "utf8");
 const server = createServer(async (req, res) => {
 	let heartbeat;
+	let trace;
 	try {
 		const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
-		if (req.method === "GET" && url.pathname === "/health") return json(res, 200, { status: "ok", service: MODEL, pi: "1.0.0" });
+		if (req.method === "GET" && url.pathname === "/health") return json(res, 200, { status: "ok", service: MODEL, pi: PI_VERSION });
 		if (req.method === "GET" && url.pathname === "/ready") return json(res, 200, { ready: existsSync(PI_CLI), mcp: existsSync(path.join(projectRoot, ".pi", "mcp.json")) });
 		if (req.method === "GET" && url.pathname.startsWith("/files/")) return serveArtifact(res, url.pathname);
 		if (req.method === "POST" && url.pathname === "/internal/mcp") {
@@ -676,8 +718,20 @@ const server = createServer(async (req, res) => {
 			const candidates = fileCandidates(body);
 			if (!uploadText.instruction && !uploadText.files.length && !candidates.length) return json(res, 400, { error: { message: "A user message or document is required", type: "invalid_request_error" } });
 			const key = conversationKey(req, body);
-			const files = await saveUploads(key, candidates, uploadText.files);
 			const id = `chatcmpl-${randomUUID()}`;
+			trace = createRequestTrace({
+				requestId: id,
+				sessionId: `junior-silva-v2-${key}`,
+				conversationKey: key,
+				source: "openai",
+				model: MODEL,
+				provider: env("PI_PROVIDER", "google"),
+				thinking: env("PI_THINKING", "medium"),
+			});
+			await trace.start({ original_query: uploadText.instruction, stream: body.stream !== false, attachment_input_mode: uploadText.files.length ? "upload_as_text" : candidates.length ? "provider_upload" : "none" });
+			const files = await saveUploads(key, candidates, uploadText.files);
+			const retainedFiles = await conversationUploadPaths(key);
+			await trace.attachments(await describeUploads(key, retainedFiles, files), retainedFiles.length);
 			const streaming = body.stream !== false;
 			const includeStreamUsage = requestsStreamUsage(body);
 			const requestWorkspace = path.join(workspaceRoot, "requests", key, id);
@@ -685,9 +739,11 @@ const server = createServer(async (req, res) => {
 			if (streaming) { startStream(res, id); heartbeat = setInterval(() => res.write(": keep-alive\n\n"), 15_000); }
 			const onProgress = (message) => { if (streaming) streamDelta(res, id, "reasoning_content", `${message}\n`); };
 			const result = await serial(key, async () => {
-				const initial = await runPi(piPrompt(uploadText.instruction, files, requestWorkspace), `junior-silva-v2-${key}`, onProgress, requestWorkspace);
-				return recoverUndeliveredArtifact({ instruction: uploadText.instruction, requestWorkspace, sessionId: `junior-silva-v2-${key}`, initial, onProgress });
+				const initial = await runPi(piPrompt(uploadText.instruction, files, requestWorkspace), `junior-silva-v2-${key}`, onProgress, requestWorkspace, trace);
+				return recoverUndeliveredArtifact({ instruction: uploadText.instruction, requestWorkspace, sessionId: `junior-silva-v2-${key}`, initial, onProgress, trace });
 			});
+			const delivered = trace.delivery();
+			await trace.finish({ outcome: "completed", answer: result.answer, usage: result.usage, elapsedMs: result.elapsedMs, artifacts: delivered.artifacts, previews: delivered.previews });
 			if (heartbeat) clearInterval(heartbeat);
 			if (streaming) return finishStream(res, id, result.answer, includeStreamUsage ? result.usage : undefined);
 			return json(res, 200, { id, object: "chat.completion", created: Math.floor(Date.now() / 1000), model: MODEL, choices: [{ index: 0, message: { role: "assistant", content: result.answer }, finish_reason: "stop" }], ...(result.usage ? { usage: result.usage } : {}) });
@@ -695,6 +751,7 @@ const server = createServer(async (req, res) => {
 		return json(res, 404, { error: { message: "Not found", type: "invalid_request_error" } });
 	} catch (error) {
 		if (heartbeat) clearInterval(heartbeat);
+		await trace?.finish({ outcome: "error", elapsedMs: undefined, error: error?.message || String(error) });
 		console.error(`[junior-silva-v2] ${error?.stack || error}`);
 		const status = Number(error?.status || 500);
 		const message = status < 500 ? error.message : "Junior Silva could not complete this request. Please retry or contact the administrator.";

@@ -23,4 +23,5 @@ $citationDelivery = Join-Path $PSScriptRoot '.pi/extensions/legal-research-citat
 $previewDelivery = Join-Path $PSScriptRoot '.pi/extensions/librechat-preview-delivery.ts'
 $legalContext = Join-Path $PSScriptRoot '.pi/extensions/junior-silva-legal-context.ts'
 $scopeGuard = Join-Path $PSScriptRoot '.pi/extensions/junior-silva-scope-guard.ts'
-& node (Join-Path $PSScriptRoot 'packages/coding-agent/dist/bundle/cli.js') --tui-mode regular --approve --provider $provider --model $model --thinking $thinking --extension $legalContext --extension $scopeGuard --extension $citationDelivery --extension $previewDelivery @args
+$traceLogger = Join-Path $PSScriptRoot '.pi/extensions/junior-silva-local-trace.ts'
+& node (Join-Path $PSScriptRoot 'packages/coding-agent/dist/bundle/cli.js') --tui-mode regular --approve --provider $provider --model $model --thinking $thinking --extension $legalContext --extension $scopeGuard --extension $citationDelivery --extension $previewDelivery --extension $traceLogger @args

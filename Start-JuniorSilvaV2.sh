@@ -56,4 +56,5 @@ exec node packages/coding-agent/dist/bundle/cli.js \
   --extension "$script_dir/.pi/extensions/junior-silva-scope-guard.ts" \
   --extension "$script_dir/.pi/extensions/legal-research-citation-delivery.ts" \
   --extension "$script_dir/.pi/extensions/librechat-preview-delivery.ts" \
+  --extension "$script_dir/.pi/extensions/junior-silva-local-trace.ts" \
   "$@"
