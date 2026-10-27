@@ -2,6 +2,15 @@
 
 This is a factual implementation history for engineers continuing work on Junior Silva V2. It intentionally excludes credentials, user files, session contents, and deployment-specific values.
 
+## Stateful LibreChat attachment delivery and upload deduplication
+
+- LibreChat uses normal OpenAI-compatible, history-bearing requests while Junior Silva V2 reuses one Pi session per authenticated user-conversation key. The prior bridge consequently scanned historical request messages, re-downloaded earlier attachments, created random duplicate upload copies, and supplied all retained files to Pi on every turn.
+- The Junior Silva V2 agent preset now uses LibreChat's `resendFiles: false` option. LibreChat therefore retains normal conversation text but sends only files attached on the current turn to this model; other endpoint/model behaviour is unchanged.
+- `server/openai.mjs` now reads only the latest user message for provider-file content and Upload-as-Text envelopes. Historical OCR/text envelopes are not re-materialised as new documents on a later text-only turn.
+- Uploads are retained inside the HMAC-isolated user-conversation directory through a private `.manifest.json`. The manifest maps an available source file ID and an SHA-256 content digest to one retained file. This prevents repeated downloads/copies, while a same-name file with different bytes is retained separately.
+- Each Pi turn receives only paths introduced on that turn. Earlier paths remain in the durable Pi session and may be re-read only when the current request requires them; the bridge no longer lists the entire historical upload directory in every prompt.
+- Focused tests cover current-turn-only candidate selection, Upload-as-Text history suppression, byte-level deduplication, changed same-name documents, and retained-file prompt behaviour. An end-to-end local LibreChat-style full-history test completed two requests while retaining exactly one copy of a deliberately repeated attachment. A manual three-turn test confirmed: first upload supplied once, second upload supplied once, text-only third request supplied no document path, and the manifest retained exactly the two distinct PDFs.
+
 ## Native review finalisation — two-tool surface
 
 - Replaced the fragmented production review-tool surface with `review_prepare_document_set` and `review_finalize_document`.
@@ -108,7 +117,7 @@ Implemented junior-silva/mcp/server.mjs and the service adapters under junior-si
 - Added `core/native-review.mjs`: it reads a primary document with all supporting evidence, produces a source clause inventory, applies the nine-dimension commercial-coverage challenge adapted from Reviewer V3, validates every proposed finding against its original anchor text, and renders reports from accepted findings only.
 - Added `core/precedents.mjs`: it searches and reads a private, read-only external drafting corpus with bounded excerpts, explicitly treating it as structural precedent rather than legal authority. It also checks final textual drafts for unresolved placeholders.
 - Added the `sri-lankan-legal-review` and `sri-lankan-legal-drafting` skills. These tell Pi to inspect evidence first, use RAG for Sri Lankan legal propositions, keep safe clauses in revisions, produce before/after comparisons for material amendments, and never disclose precedent paths or confidential source material.
-- Updated the OpenAI bridge so each turn supplies every upload already attached to the same conversation, not only files uploaded in the latest message. This lets later employment agreements, annexures, or supporting evidence materially inform review/drafting rather than being mistaken for a text-only answer.
+- The original bridge was updated to preserve multi-document evidence across a conversation. This is now implemented more efficiently by the stateful attachment-delivery design above: new evidence is supplied once, retained in the conversation document library and Pi session, and can still materially inform later review/drafting without replaying every file on every turn.
 - Added focused deterministic native-review tests for multi-document packets, anchor acceptance/rejection, coverage evidence, generated review reports, and placeholder detection.
 
 ## Windows CLI legal-DOCX recovery

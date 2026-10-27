@@ -265,20 +265,20 @@ test("case catalogue resolves court, report, month and numeric report filters be
 		requests.push(url);
 		const field = url.searchParams.get("facet_by");
 		if (field) {
-			const values = { sc_or_ca: "CA", report: "NLR", decision_month: "9" };
+			const values = { sc_or_ca: "CA", report: "NLR", decision_month: "September" };
 			return new Response(JSON.stringify({ facet_counts: [{ field_name: field, counts: [{ value: values[field], count: 3 }] }] }), { status: 200 });
 		}
-		return new Response(JSON.stringify({ found: 1, hits: [{ document: { primary_key: "case-2", standard_casenumber: "CA/NLR/1", nameofparties: "A v B", summary_text: "Tax", report: "NLR", sc_or_ca: "CA", decision_month: "9", decision_year: 2026, report_year: 2026, volume_num: 3, page_num: 99, link: "https://lex.example/case-2" } }] }), { status: 200 });
+		return new Response(JSON.stringify({ found: 1, hits: [{ document: { primary_key: "case-2", standard_casenumber: "CA/NLR/1", nameofparties: "A v B", summary_text: "Tax", report: "NLR", sc_or_ca: "CA", decision_month: "September", decision_year: 2026, report_year: 2026, volume_num: 3, page_num: 99, link: "https://lex.example/case-2" } }] }), { status: 200 });
 	};
 	try {
 		const result = await retrieveLegalSourceDetails({ source: "case_decision", operation: "case_catalog", court: "Court of Appeal", report: "NLR", decision_month: "September", decision_year: 2026, report_year: 2026, volume_num: 3, page_num: 99, subject_query: "tax" });
 		assert.equal(result.found, 1);
 		assert.equal(result.applied_filters.sc_or_ca, "CA");
 		assert.equal(result.applied_filters.report, "NLR");
-		assert.equal(result.applied_filters.decision_month, "9");
+		assert.equal(result.applied_filters.decision_month, "September");
 		assert.match(requests.at(-1).searchParams.get("filter_by"), /sc_or_ca:=`CA`/);
 		assert.match(requests.at(-1).searchParams.get("filter_by"), /report:=`NLR`/);
-		assert.match(requests.at(-1).searchParams.get("filter_by"), /decision_month:=`9`/);
+		assert.match(requests.at(-1).searchParams.get("filter_by"), /decision_month:=`September`/);
 		assert.match(requests.at(-1).searchParams.get("filter_by"), /report_year:=2026/);
 	} finally {
 		globalThis.fetch = originalFetch;
@@ -328,5 +328,114 @@ test("Lex amendment catalogue retains every matching structured amendment rather
 		globalThis.fetch = originalFetch;
 		if (oldUrl === undefined) delete process.env.JUNIOR_LEX_LEGISLATION_API_URL; else process.env.JUNIOR_LEX_LEGISLATION_API_URL = oldUrl;
 		if (oldKey === undefined) delete process.env.JUNIOR_LEX_LEGISLATION_API_KEY; else process.env.JUNIOR_LEX_LEGISLATION_API_KEY = oldKey;
+	}
+});
+
+test("Lex recent amendment catalogue reads each bounded page and returns the newest instruments first", async () => {
+	const originalFetch = globalThis.fetch;
+	const oldUrl = process.env.JUNIOR_LEX_LEGISLATION_API_URL;
+	const oldKey = process.env.JUNIOR_LEX_LEGISLATION_API_KEY;
+	process.env.JUNIOR_LEX_LEGISLATION_API_URL = "https://lex.example.test";
+	process.env.JUNIOR_LEX_LEGISLATION_API_KEY = "test-key";
+	const requests = [];
+	globalThis.fetch = async (input) => {
+		const url = new URL(String(input));
+		requests.push(url);
+		const page = Number(url.searchParams.get("page"));
+		const pages = {
+			1: {
+				total: 4, pages: 2, items: [
+					{ id: "legislation_A_1", title: "Act A (Amendment) Act", enactment_year: 2024 },
+					{ id: "legislation_C_1", title: "Constitutional Amendment", enactment_year: 2026 },
+				],
+			},
+			2: {
+				total: 4, pages: 2, items: [
+					{ id: "legislation_O_1", title: "Other Amendment Act", enactment_year: 2025 },
+					{ id: "legislation_N_1", title: "Not an amending law", enactment_year: 2026 },
+				],
+			},
+		};
+		return new Response(JSON.stringify(pages[page]), { status: 200 });
+	};
+	try {
+		const result = await retrieveLexLegislationDetails({ operation: "recent_amendments", recent_limit: 2 });
+		assert.equal(requests.length, 2);
+		assert.equal(requests[0].searchParams.get("q"), "Amendment");
+		assert.equal(requests[0].searchParams.get("per_page"), "100");
+		assert.equal(result.found, 2);
+		assert.deepEqual(result.records.map((item) => item.record_id), ["legislation_C_1", "legislation_O_1"]);
+		assert.equal(result.records[0].fields.link, "https://lex.example.test/legislation_C_1/legislation/full-view");
+		assert.deepEqual(result.catalogue_coverage, { matching_title_records: 4, pages_available: 2, pages_read: 2, complete: true });
+	} finally {
+		globalThis.fetch = originalFetch;
+		if (oldUrl === undefined) delete process.env.JUNIOR_LEX_LEGISLATION_API_URL; else process.env.JUNIOR_LEX_LEGISLATION_API_URL = oldUrl;
+		if (oldKey === undefined) delete process.env.JUNIOR_LEX_LEGISLATION_API_KEY; else process.env.JUNIOR_LEX_LEGISLATION_API_KEY = oldKey;
+	}
+});
+
+test("case catalogue reports incomplete pagination rather than disguising a first page as a complete list", async () => {
+	const originalFetch = globalThis.fetch;
+	const previous = Object.fromEntries(["JUNIOR_TYPESENSE_ENABLED", "JUNIOR_TYPESENSE_DECISION_HOST", "JUNIOR_TYPESENSE_DECISION_API_KEY"].map((key) => [key, process.env[key]]));
+	process.env.JUNIOR_TYPESENSE_ENABLED = "true";
+	process.env.JUNIOR_TYPESENSE_DECISION_HOST = "decisions.example.test";
+	process.env.JUNIOR_TYPESENSE_DECISION_API_KEY = "test-key";
+	const requests = [];
+	globalThis.fetch = async (input) => {
+		const url = new URL(String(input));
+		requests.push(url);
+		if (!url.pathname.endsWith("/documents/search")) return new Response(JSON.stringify({ fields: [] }), { status: 200 });
+		return new Response(JSON.stringify({
+			found: 9,
+			hits: Array.from({ length: 5 }, (_, index) => ({ document: {
+				primary_key: `case-${index + 1}`,
+				nameofparties: `Party ${index + 1} v Respondent`,
+				decision_year: 2026,
+				sc_or_ca: "SC",
+				link: `https://lex.example/case-${index + 1}`,
+			} })),
+		}), { status: 200 });
+	};
+	try {
+		const result = await retrieveLegalSourceDetails({ source: "case_decision", operation: "case_catalog", decision_year: 2026, page_size: 5 });
+		assert.equal(requests.length, 1);
+		assert.equal(requests[0].searchParams.get("per_page"), "5");
+		assert.equal(result.found, 9);
+		assert.equal(result.returned, 5);
+		assert.equal(result.total_pages, 2);
+		assert.equal(result.has_more, true);
+		assert.equal(result.next_page, 2);
+	} finally {
+		globalThis.fetch = originalFetch;
+		for (const [key, value] of Object.entries(previous)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
+	}
+});
+
+test("case catalogue resolves a natural court name through an indexed court abbreviation", async () => {
+	const originalFetch = globalThis.fetch;
+	const previous = Object.fromEntries(["JUNIOR_TYPESENSE_ENABLED", "JUNIOR_TYPESENSE_DECISION_HOST", "JUNIOR_TYPESENSE_DECISION_API_KEY"].map((key) => [key, process.env[key]]));
+	process.env.JUNIOR_TYPESENSE_ENABLED = "true";
+	process.env.JUNIOR_TYPESENSE_DECISION_HOST = "decisions.example.test";
+	process.env.JUNIOR_TYPESENSE_DECISION_API_KEY = "test-key";
+	const requests = [];
+	globalThis.fetch = async (input) => {
+		const url = new URL(String(input));
+		requests.push(url);
+		if (url.searchParams.get("facet_by") === "sc_or_ca") {
+			const query = url.searchParams.get("facet_query");
+			const counts = query === "sc_or_ca:sc" ? [{ value: "SC", count: 9 }] : [];
+			return new Response(JSON.stringify({ facet_counts: [{ field_name: "sc_or_ca", counts }] }), { status: 200 });
+		}
+		return new Response(JSON.stringify({ found: 9, hits: [] }), { status: 200 });
+	};
+	try {
+		const result = await retrieveLegalSourceDetails({ source: "case_decision", operation: "case_catalog", court: "Supreme Court", decision_year: 2026, page_size: 20 });
+		assert.equal(result.found, 9);
+		assert.equal(result.applied_filters.sc_or_ca, "SC");
+		assert.deepEqual(requests.slice(0, 2).map((url) => url.searchParams.get("facet_query")), ["sc_or_ca:Supreme Court", "sc_or_ca:sc"]);
+		assert.match(requests.at(-1).searchParams.get("filter_by"), /sc_or_ca:=`SC`/);
+	} finally {
+		globalThis.fetch = originalFetch;
+		for (const [key, value] of Object.entries(previous)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
 	}
 });

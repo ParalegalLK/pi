@@ -4,6 +4,9 @@ const MAX_RESULTS = 8;
 const DEFAULT_FIELD_CHARS = 12_000;
 const MAX_FIELD_CHARS = 60_000;
 const MAX_ARRAY_ITEMS = 12;
+const RECENT_AMENDMENT_CATALOGUE_PAGE_SIZE = 100;
+const MAX_RECENT_AMENDMENT_CATALOGUE_PAGES = 4;
+const MAX_RECENT_AMENDMENT_RESULTS = 50;
 
 const LEGISLATION_FIELDS = [
 	"id", "legislation_id", "title", "legislation_title", "description", "act_year", "enactment_date", "section_count",
@@ -129,6 +132,11 @@ function endpoint(pathname, query = {}) {
 	return url;
 }
 
+function publicLegislationUrl(recordId) {
+	const base = requiredEnv("JUNIOR_LEX_LEGISLATION_API_URL");
+	return `${new URL(base).origin}/${encodeURIComponent(recordId)}/legislation/full-view`;
+}
+
 async function get(pathname, query) {
 	const response = await fetch(endpoint(pathname, query), {
 		// The Lex service reserves bearer authentication for interactive user JWTs.
@@ -216,6 +224,66 @@ export async function retrieveLexLegislationDetails(args, { onProgress = () => {
 		};
 	}
 
+	if (operation === "recent_amendments") {
+		const recentLimit = boundedPositiveInteger(args.recent_limit, {
+			minimum: 1,
+			maximum: MAX_RECENT_AMENDMENT_RESULTS,
+			fallback: 20,
+			name: "recent_limit",
+		});
+		onProgress("Reading the structured Lex catalogue of amendment instruments…");
+		const firstPage = await get("/api/legislations", {
+			q: "Amendment",
+			per_page: RECENT_AMENDMENT_CATALOGUE_PAGE_SIZE,
+			page: 1,
+		});
+		const availablePages = Math.max(1, Number(firstPage.pages || 1));
+		const pagesToRead = Math.min(availablePages, MAX_RECENT_AMENDMENT_CATALOGUE_PAGES);
+		const catalogueItems = [...(firstPage.items || [])];
+		for (let page = 2; page <= pagesToRead; page += 1) {
+			onProgress("Reading the next bounded page of amendment instruments…");
+			const payload = await get("/api/legislations", {
+				q: "Amendment",
+				per_page: RECENT_AMENDMENT_CATALOGUE_PAGE_SIZE,
+				page,
+			});
+			catalogueItems.push(...(payload.items || []));
+		}
+		const unique = new Map();
+		for (const item of catalogueItems) {
+			const recordId = String(item?.id || item?.legislation_id || "").trim();
+			const title = String(item?.title || item?.legislation_title || "").trim();
+			if (!recordId || !title || !/\bamendment\b/i.test(title)) continue;
+			const enactmentYear = numericYear(item?.enactment_year) || numericYear(item?.enactment_date);
+			const actYear = numericYear(item?.act_year);
+			unique.set(recordId, {
+				record_id: recordId,
+				title,
+				act_year: actYear || null,
+				enactment_year: enactmentYear || actYear || null,
+				link: publicLegislationUrl(recordId),
+			});
+		}
+		const amendments = [...unique.values()]
+			.sort((left, right) => (right.enactment_year || 0) - (left.enactment_year || 0) || left.title.localeCompare(right.title))
+			.slice(0, recentLimit);
+		return {
+			source: "legislation",
+			source_label: "structured Lex legislation records",
+			operation,
+			found: amendments.length,
+			recent_limit: recentLimit,
+			catalogue_coverage: {
+				matching_title_records: Number(firstPage.total || catalogueItems.length),
+				pages_available: availablePages,
+				pages_read: pagesToRead,
+				complete: pagesToRead === availablePages,
+			},
+			records: amendments.map((item) => ({ record_id: item.record_id, fields: item })),
+			guidance: "These are the most recent Lex catalogue records whose titles identify them as amendment instruments. They establish titles and indexed years, not the amendment's precise operative text, commencement, or legal effect. Retrieve a selected record or read an official PDF where that detail matters. Preserve each Lex link and do not call this bounded recent list an exhaustive history when catalogue_coverage.complete is false.",
+		};
+	}
+
 	if (operation === "find") {
 		const query = String(args.query || args.legislation_title || "").trim();
 		if (!query) throw new Error("Provide query or legislation_title to find legislation.");
@@ -289,6 +357,22 @@ export function lexLegislationCapabilities() {
 			section_number: { label: "section number", type: "exact value after Act selection" },
 			amendment_year: { label: "amendment year", type: "integer; used with amendment_catalog" },
 		},
-		guidance: "Lex supports title discovery and exact Act/section reads. amendment_catalog reads the complete selected Act record and locally filters its structured amendment entries by year; it does not use the unreliable legislation Typesense fallback.",
+		supported_catalogues: {
+			recent_amendments: "Bounded, chronological catalogue of Lex legislation titles containing Amendment.",
+			amendment_catalog: "Every structured amendment entry in one resolved Act record for a stated year.",
+		},
+		guidance: "Lex supports title discovery and exact Act/section reads. recent_amendments reads bounded pages of the amendment-instrument catalogue. amendment_catalog reads the complete selected Act record and locally filters its structured amendment entries by year; neither operation uses the unreliable legislation Typesense fallback.",
 	};
+}
+
+function numericYear(value) {
+	const match = String(value || "").match(/\b(18\d{2}|19\d{2}|20\d{2}|21\d{2})\b/);
+	return match ? Number(match[1]) : undefined;
+}
+
+function boundedPositiveInteger(value, { minimum, maximum, fallback, name }) {
+	if (value === undefined || value === null || value === "") return fallback;
+	const number = Number(value);
+	if (!Number.isInteger(number) || number < minimum || number > maximum) throw new Error(`${name} must be an integer from ${minimum} to ${maximum}.`);
+	return number;
 }

@@ -70,16 +70,16 @@ function splitTextEnvelope(value = "") {
 	return { instruction, files };
 }
 
+function latestUserMessage(messages = []) {
+	return [...messages].reverse().find((item) => item?.role === "user") || {};
+}
+
 function textUploads(messages = []) {
-	const users = messages.filter((item) => item?.role === "user");
-	const latest = messageText(users.at(-1) || {});
-	const direct = splitTextEnvelope(latest);
-	if (direct.files.length) return direct;
-	for (let index = users.length - 2; index >= 0; index -= 1) {
-		const candidate = splitTextEnvelope(messageText(users[index]));
-		if (candidate.files.length) return { instruction: latest || candidate.instruction, files: candidate.files };
-	}
-	return { instruction: latest, files: [] };
+	// LibreChat's standard chat-completions payload includes prior messages. An
+	// older "Upload as Text" envelope is already available in Pi's session and
+	// must not be treated as a newly uploaded document on a later turn.
+	const latest = messageText(latestUserMessage(messages));
+	return splitTextEnvelope(latest);
 }
 
 function fileCandidates(body) {
@@ -87,16 +87,23 @@ function fileCandidates(body) {
 	const add = (item = {}) => {
 		const nested = [item.image_url, item.file_url, item.document_url, item.file].find((value) => value && typeof value === "object") || {};
 		const url = item.url || item.data || item.file_data || item.base64 || nested.url || nested.file_data;
-		if (typeof url === "string" && url) output.push({ url, name: item.name || item.filename || nested.filename || nested.name });
+		const sourceId = item.file_id || item.id || nested.file_id || nested.id;
+		if (typeof url === "string" && url) output.push({ url, name: item.name || item.filename || nested.filename || nested.name, sourceId: typeof sourceId === "string" ? sourceId : "" });
 	};
 	for (const item of Array.isArray(body.attachments) ? body.attachments : []) add(item);
 	for (const item of Array.isArray(body.files) ? body.files : []) add(item);
-	for (const message of Array.isArray(body.messages) ? body.messages : []) {
-		for (const item of Array.isArray(message?.attachments) ? message.attachments : []) add(item);
-		for (const item of Array.isArray(message?.files) ? message.files : []) add(item);
-		for (const item of Array.isArray(message?.content) ? message.content : []) if (item?.type !== "text" && item?.type !== "input_text") add(item);
-	}
-	return output;
+	const latest = latestUserMessage(Array.isArray(body.messages) ? body.messages : []);
+	for (const item of Array.isArray(latest?.attachments) ? latest.attachments : []) add(item);
+	for (const item of Array.isArray(latest?.files) ? latest.files : []) add(item);
+	for (const item of Array.isArray(latest?.content) ? latest.content : []) if (item?.type !== "text" && item?.type !== "input_text") add(item);
+
+	const seen = new Set();
+	return output.filter((candidate) => {
+		const identity = candidate.sourceId ? `id:${candidate.sourceId}` : candidate.url;
+		if (seen.has(identity)) return false;
+		seen.add(identity);
+		return true;
+	});
 }
 
 function extensionForMime(mime = "") {
@@ -129,21 +136,68 @@ function conversationKey(req, body) {
 	return createHmac("sha256", API_KEY).update(`${user}:${stable}`).digest("hex").slice(0, 32);
 }
 
+function uploadManifestPath(directory) {
+	return path.join(directory, ".manifest.json");
+}
+
+async function loadUploadManifest(directory) {
+	try {
+		const parsed = JSON.parse(await readFile(uploadManifestPath(directory), "utf8"));
+		if (parsed?.version === 1 && parsed?.files && typeof parsed.files === "object" && parsed?.sourceIds && typeof parsed.sourceIds === "object") return parsed;
+	} catch (caught) {
+		if (!(caught && typeof caught === "object" && "code" in caught && caught.code === "ENOENT")) console.warn("[junior-silva-v2] Ignoring an invalid upload manifest");
+	}
+	return { version: 1, files: {}, sourceIds: {} };
+}
+
+function manifestFilePath(directory, entry) {
+	if (!entry || typeof entry.filename !== "string") return undefined;
+	const target = path.resolve(directory, entry.filename);
+	return target.startsWith(`${path.resolve(directory)}${path.sep}`) ? target : undefined;
+}
+
+async function existingSourcePath(directory, manifest, sourceId) {
+	if (!sourceId) return undefined;
+	const digest = manifest.sourceIds[`file:${sourceId}`];
+	const target = manifestFilePath(directory, manifest.files[digest]);
+	return target && existsSync(target) ? target : undefined;
+}
+
+async function retainUpload(directory, manifest, { bytes, filename, sourceId = "" }) {
+	const digest = createHash("sha256").update(bytes).digest("hex");
+	let target = manifestFilePath(directory, manifest.files[digest]);
+	let isNew = false;
+	if (!target || !existsSync(target)) {
+		const extension = path.extname(filename);
+		target = path.join(directory, `${digest}${extension}`);
+		await writeFile(target, bytes);
+		manifest.files[digest] = { filename: path.basename(target), originalName: safeFilename(filename) };
+		isNew = true;
+	}
+	if (sourceId) manifest.sourceIds[`file:${sourceId}`] = digest;
+	return { path: target, isNew };
+}
+
 async function saveUploads(key, candidates, extracted) {
 	const directory = path.join(uploadsRoot, key);
 	await mkdir(directory, { recursive: true });
+	const manifest = await loadUploadManifest(directory);
 	const paths = [];
 	for (const candidate of candidates) {
+		const retained = await existingSourcePath(directory, manifest, candidate.sourceId);
+		if (retained) continue;
 		const file = await fetchFile(candidate);
-		const destination = path.join(directory, `${randomUUID().slice(0, 8)}-${file.filename}`);
-		await writeFile(destination, file.bytes);
-		paths.push(destination);
+		const saved = await retainUpload(directory, manifest, { ...file, sourceId: candidate.sourceId });
+		if (saved.isNew) paths.push(saved.path);
 	}
 	for (const file of extracted) {
-		const destination = path.join(directory, `${randomUUID().slice(0, 8)}-${safeFilename(file.name).replace(/\.[^.]+$/, "")}.md`);
-		await writeFile(destination, file.text, "utf8");
-		paths.push(destination);
+		const saved = await retainUpload(directory, manifest, {
+			bytes: Buffer.from(file.text, "utf8"),
+			filename: `${safeFilename(file.name).replace(/\.[^.]+$/, "")}.md`,
+		});
+		if (saved.isNew) paths.push(saved.path);
 	}
+	await writeFile(uploadManifestPath(directory), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
 	return paths;
 }
 
@@ -151,7 +205,7 @@ async function conversationUploadPaths(key) {
 	const directory = path.join(uploadsRoot, key);
 	try {
 		const entries = await readdir(directory, { withFileTypes: true });
-		return entries.filter((entry) => entry.isFile()).map((entry) => path.join(directory, entry.name)).sort();
+		return entries.filter((entry) => entry.isFile() && !entry.name.startsWith(".")).map((entry) => path.join(directory, entry.name)).sort();
 	} catch (caught) {
 		if (caught && typeof caught === "object" && "code" in caught && caught.code === "ENOENT") return [];
 		throw caught;
@@ -160,7 +214,7 @@ async function conversationUploadPaths(key) {
 
 function piPrompt(instruction, files, requestWorkspace) {
 	const workspace = `Use this request-only workspace for every file you create: ${requestWorkspace}. Do not read, write, or publish files from any other workspace directory.`;
-	if (!files.length) return `${workspace}\n\nUser request:\n${instruction}`;
+	if (!files.length) return `${workspace}\n\nDocuments supplied in earlier turns remain available in this Pi session. Re-read one only when it is necessary for the user's current request.\n\nUser request:\n${instruction}`;
 	return `${workspace}\n\nThe user supplied these local document files with this request:\n${files.map((item) => `- ${item}`).join("\n")}\n\nUser request:\n${instruction || "Examine the supplied legal documents and respond appropriately."}`;
 }
 
@@ -622,8 +676,7 @@ const server = createServer(async (req, res) => {
 			const candidates = fileCandidates(body);
 			if (!uploadText.instruction && !uploadText.files.length && !candidates.length) return json(res, 400, { error: { message: "A user message or document is required", type: "invalid_request_error" } });
 			const key = conversationKey(req, body);
-			await saveUploads(key, candidates, uploadText.files);
-			const files = await conversationUploadPaths(key);
+			const files = await saveUploads(key, candidates, uploadText.files);
 			const id = `chatcmpl-${randomUUID()}`;
 			const streaming = body.stream !== false;
 			const includeStreamUsage = requestsStreamUsage(body);
@@ -653,4 +706,4 @@ const server = createServer(async (req, res) => {
 server.listen(PORT, HOST, () => console.log(`[junior-silva-v2] listening on ${HOST}:${PORT}`));
 }
 
-export { fileCandidates, messageText, splitTextEnvelope, textUploads };
+export { conversationUploadPaths, fileCandidates, messageText, piPrompt, saveUploads, splitTextEnvelope, textUploads };
