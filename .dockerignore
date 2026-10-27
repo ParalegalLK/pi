@@ -2,6 +2,8 @@
 .env
 node_modules
 junior-silva/node_modules
+packages/**/node_modules
+packages/**/dist
 junior-silva/artifacts
 junior-silva/uploads
 junior-silva/sessions
