@@ -56,40 +56,33 @@ The **Tools used** section is expandable and contains the redacted request, prog
 
 ## Importing deployed-server traces into the local viewer
 
-Server traces use the identical schema. Export them from the Docker container, copy them into a dated subdirectory beneath the local trace root, then refresh the viewer. The reader scans recursively, so no code or configuration change is required.
+Server traces use the identical schema. The Compose deployment bind-mounts the trace directory to the server checkout, so copy it directly from the server into one stable local import directory, then refresh the viewer. The reader scans recursively, so no code or configuration change is required.
 
-### 1. Export a dated copy on the server
+### Copy it to the Windows development machine
 
-Run this on `chat-dev` after the relevant Junior Silva requests have completed:
-
-```bash
-cd ~/app/junior-silva-v2
-export JS_TRACE_EXPORT="$HOME/junior-silva-v2-traces-$(date +%F-%H%M%S)"
-mkdir -p "$JS_TRACE_EXPORT"
-docker cp junior-silva-v2:/data/logs/traces/. "$JS_TRACE_EXPORT/"
-
-find "$JS_TRACE_EXPORT" -name trace.json | wc -l
-printf 'Export directory: %s\n' "$JS_TRACE_EXPORT"
-```
-
-`docker cp` copies the container's persistent `/data/logs/traces` tree without modifying it. Keep the printed export directory for the next step.
-
-### 2. Copy it to the Windows development machine
-
-In Windows PowerShell, replace the timestamp in `$serverExport` with the directory printed by the server command:
+In Windows PowerShell:
 
 ```powershell
-$serverExport = '~/junior-silva-v2-traces-2026-10-27-153000'
-$localImport = "D:\Intern\Work\Junior Silva V2\pi\junior-silva\logs\traces\server-chat-dev-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+$serverTraceRoot = '~/app/junior-silva-v2/junior-silva/logs/traces'
+$localImport = 'D:\Intern\Work\Junior Silva V2\pi\junior-silva\logs\traces\server-chat-dev'
 
 New-Item -ItemType Directory -Force -Path $localImport | Out-Null
-scp -r "paralegaluser@chat-dev:$serverExport/." $localImport
+scp -r "paralegaluser@chat-dev:$serverTraceRoot/." $localImport
 Get-ChildItem -Recurse -File $localImport -Filter trace.json | Measure-Object
 ```
 
-This creates an import folder rather than merging files into the native local traces. It is safe to repeat for later server exports and makes the provenance of imported traces clear.
+This creates a separate, stable import folder rather than merging files into native local traces. Re-run the same command later to update that folder with the server's current trace tree. Do not use a new dated destination for a full-copy sync: the viewer would otherwise see duplicate copies of the same request trace.
 
-### 3. View the imported sessions
+If the `chat-dev` SSH alias is configured only in WSL (rather than in Windows `%USERPROFILE%\.ssh\config`), run the copy through WSL instead. It writes to the same local directory:
+
+```bash
+local_import='/mnt/d/Intern/Work/Junior Silva V2/pi/junior-silva/logs/traces/server-chat-dev'
+mkdir -p "$local_import"
+scp -r 'chat-dev:~/app/junior-silva-v2/junior-silva/logs/traces/.' "$local_import"
+find "$local_import" -type f -name trace.json | wc -l
+```
+
+### View the imported sessions
 
 1. Ensure the local file-backed logs API and viewer are running.
 2. Refresh [http://localhost:3002/chatlogs](http://localhost:3002/chatlogs).

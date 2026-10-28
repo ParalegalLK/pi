@@ -35,7 +35,7 @@ The model then reasons normally and picks tools. It is not forced through one un
 ## 2. Master prompt, skills, extensions, and tool selection
 
 ### I) Master Prompts
-The Junior Silva application-level master prompt is the four blocks injected by [junior-silva-legal-context.ts](.pi/extensions/junior-silva-legal-context.ts). It is dynamic because the Colombo time is inserted fresh for every run.
+The Junior Silva application-level master prompt is the instruction blocks injected by [junior-silva-legal-context.ts](.pi/extensions/junior-silva-legal-context.ts). It is dynamic because the Colombo time is inserted fresh for every run.
 
 Then, Pi creates its ordinary system prompt dynamically in [system-prompt.ts](packages/coding-agent/src/core/system-prompt.ts). It includes:
 
@@ -74,6 +74,9 @@ Authoritative current date and time: [live Asia/Colombo date and time]. Use this
 
 ## LibreChat artifact delivery
 For every completed, user-facing file—whether produced by a document skill or received from Reviewer Perera, Drafter Weeramantry, or Translator Siriwardena—first preserve the original file and its download link. In LibreChat, normally call librechat_prepare_document_preview once for the primary final DOCX, PDF, PPTX, XLSX, Markdown, text, or JSON deliverable before your final answer, so the user can inspect it in the side panel. Do not preview intermediate files, duplicate source formats, ordinary short chat-only emails, or an unchanged file that is already previewed in the current turn. A preview never replaces the original downloadable file.
+
+## Final legal answers
+Before composing a substantive user-facing final answer about Sri Lankan law, a case, legislation, current legal developments, or legal research, read and apply the sri-lankan-legal-final-answer skill. This does not apply to a checkpoint question, a short progress update, a greeting, or the body of a requested email or formal legal work product. Preserve Markdown source links returned by research tools and place each retained authority beside the proposition it supports.
 ```
 ### II) Skills
 
@@ -84,6 +87,7 @@ Skills are separate instruction files. Pi sees their names, descriptions, and lo
 | [sri-lankan-legal-research](.agents/skills/sri-lankan-legal-research/SKILL.md) | Routes factual case catalogues, indexed-value discovery, and Act-amendment lists to direct indexed/Lex sources; reserves RAG for holdings, legal analysis, comparison, and synthesis. It prevents incomplete judge names from silently collapsing to one label. |
 | [sri-lankan-legal-review](.agents/skills/sri-lankan-legal-review/SKILL.md) | Evidence-first review, multi-document classification, user evidence checkpoint, source-grounded findings, colour classification, annotation validation. |
 | [sri-lankan-legal-drafting](.agents/skills/sri-lankan-legal-drafting/SKILL.md) | Native drafting, use of precedent structure without treating it as law, RAG validation, placeholders, before/after changes, final validation and publication. |
+| [sri-lankan-legal-final-answer](.agents/skills/sri-lankan-legal-final-answer/SKILL.md) | Consistent source-grounded final legal answers: direct conclusion, authority hierarchy, factual application, calibrated uncertainty, claim-level Markdown citations, and answer-type-specific structure. |
 | [legal-docx-build](.agents/skills/legal-docx-build/SKILL.md) | Court-ready legal DOCX from Markdown, with continuous numbering, nested paragraphs, TOC, page numbering, and portable build scripts. |
 | [docx](.agents/skills/docx/SKILL.md) | Create/edit/analyse DOCX, tracked changes, comments, formatting, and extraction. |
 | [pdf](.agents/skills/pdf/SKILL.md) | PDF extraction, generation, splitting/merging, forms, and validation. |
@@ -92,7 +96,7 @@ Skills are separate instruction files. Pi sees their names, descriptions, and lo
 | [doc-coauthoring](.agents/skills/doc-coauthoring/SKILL.md) | Human-guided structured document co-authoring. Disabled for automatic model invocation. |
 | [writing-style](.agents/skills/writing-style/SKILL.md) | Shared prose/style rules for other document skills. Disabled for automatic model invocation. |
 
-The legal-research, legal-review, and legal-drafting skills are the three Junior Silva-specific legal skills linked above. They are not automatically pasted in full; Pi reads the relevant skill when the task matches its description.
+The legal-research, legal-review, legal-drafting, and legal-final-answer skills are the four Junior Silva-specific legal skills linked above. They are not automatically pasted in full; Pi reads the relevant skill when the task matches its description.
 
 The actual saved Pi sessions confirm that the `.agents/skills` catalog is injected into the model-visible `<available_skills>` list, alongside Pi’s own `.pi/skills`.
 
@@ -100,8 +104,8 @@ The actual saved Pi sessions confirm that the `.agents/skills` catalog is inject
 
 | Extension | Role |
 |---|---|
-| [junior-silva-legal-context.ts](.pi/extensions/junior-silva-legal-context.ts) | Legal scope, greeting/refusal interception, review/drafting rules, multi-document rules, Colombo runtime date, artifact-delivery rule. |
-| [legal-research-citation-delivery.ts](.pi/extensions/legal-research-citation-delivery.ts) | Preserves RAG’s Markdown links. Returns a direct RAG answer verbatim for pure research; restores/appends links for composite legal work. |
+| [junior-silva-legal-context.ts](.pi/extensions/junior-silva-legal-context.ts) | Legal scope, greeting/refusal interception, review/drafting rules, multi-document rules, Colombo runtime date, artifact delivery, and the mandatory final-answer skill handoff. |
+| [legal-research-citation-delivery.ts](.pi/extensions/legal-research-citation-delivery.ts) | Preserves RAG’s Markdown links. Returns a direct RAG answer verbatim for pure research; in a Pi synthesis, linkifies only authorities actually cited and never appends an unrelated source list. |
 | [librechat-preview-delivery.ts](.pi/extensions/librechat-preview-delivery.ts) | Captures safe artifact markup/download URLs from tools, removes local paths/raw HTML, then appends safe download links and LibreChat canvas markup. |
 
 The launchers explicitly load these three. Other `.pi/extensions` files are Pi-development utilities, not part of the Junior Silva product launch contract.
@@ -231,7 +235,7 @@ So, for example:
 
 - **Review annotations:** [render_review_docx.py](junior-silva/review/render_review_docx.py) applies comments/highlights. Native finalisation checks source anchors and annotation coverage before returning deliverables.
 
-- **RAG citations:** [rag.mjs](junior-silva/services/rag.mjs) gets the synthesised RAG answer, extracts its Markdown authorities into a separate delivery bundle, and the citation extension makes sure the final answer preserves them.
+- **RAG citations:** [rag.mjs](junior-silva/services/rag.mjs) gets the synthesised RAG answer and extracts its Markdown authorities into a separate delivery bundle. The citation extension preserves valid links for authorities Pi actually retains in its final answer; it does not add a detached list of unused sources.
 
 - **Legal-source details:** Cases/chunks/books come from Typesense; Acts and sections use Lex’s structured SQLite authority API. `facet_values` discovers bounded matching values for documented case facets before Pi selects a judge/court/report/etc. `case_catalog` then applies only documented structured filters and supports a verified explicit set of indexed judge labels where the request covers more than one label. `amendment_catalog` resolves an Act title, reads its complete structured Lex record, and returns every matching indexed amendment entry for the requested year. The implementation is in [typesense-legal-sources.mjs](junior-silva/core/typesense-legal-sources.mjs) and [lex-legislation-sources.mjs](junior-silva/core/lex-legislation-sources.mjs).
 

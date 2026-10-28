@@ -57,4 +57,9 @@ export default function juniorSilvaLegalContext(pi: ExtensionAPI) {
 		systemPrompt: `${event.systemPrompt}\n\n## Required artifact completion\nA requested PPTX, XLSX, DOCX, PDF, Markdown, text, or JSON file is not delivered merely because it exists in the workspace. Before a final response, validate the requested final file and call workbench_publish_artifact. If validation identifies a defect, correct and revalidate it before publishing. Never answer with an internal progress note such as “Slide 1 needs one more fix”; either deliver the corrected file or explain a genuine blocker in user-facing terms.`,
 	}));
 
+	pi.on("before_agent_start", (event) => ({
+		systemPrompt: `${event.systemPrompt}\n\n## Final legal answers
+Before composing a substantive user-facing final answer about Sri Lankan law, a case, legislation, current legal developments, or legal research, read and apply the sri-lankan-legal-final-answer skill. This does not apply to a checkpoint question, a short progress update, a greeting, or the body of a requested email or formal legal work product. Preserve Markdown source links returned by research tools and place each retained authority beside the proposition it supports.`,
+	}));
+
 }
