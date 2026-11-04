@@ -36,6 +36,22 @@ async function createDocx(filename) {
 	return run("python3", ["-c", source, filename]);
 }
 
+async function createFormattedDocx(filename) {
+	const source = [
+		"from docx import Document",
+		"from docx.shared import RGBColor",
+		"import sys",
+		"d=Document()",
+		"p=d.add_paragraph()",
+		"prefix=p.add_run('Unmarked formatted prefix. '); prefix.bold=True; prefix.font.color.rgb=RGBColor(0x00,0x66,0x99)",
+		"first=p.add_run('The Developer assigns all '); first.italic=True",
+		"second=p.add_run('source code to the Client immediately.'); second.underline=True",
+		"d.save(sys.argv[1])",
+	].join("; ");
+	if (process.platform === "win32") return run("wsl.exe", ["-d", "Ubuntu", "--", "python3", "-c", source, wslPath(filename)]);
+	return run("python3", ["-c", source, filename]);
+}
+
 test("native DOCX review verifies comments and highlights in body and table clauses", async (t) => {
 	const directory = await mkdtemp(path.join(os.tmpdir(), "junior-silva-render-review-"));
 	t.after(() => rm(directory, { recursive: true, force: true }));
@@ -85,4 +101,60 @@ test("native renderer uses V2/V3 classifications rather than loose severity word
 	assert.match(document || "", /FF0000/);
 	assert.match(document || "", /FFC000/);
 	assert.match(document || "", /FFFF00/);
+});
+
+test("native DOCX renderer preserves unmarked run formatting and creates one comment across formatted runs", async (t) => {
+	const directory = await mkdtemp(path.join(os.tmpdir(), "junior-silva-render-format-"));
+	t.after(() => rm(directory, { recursive: true, force: true }));
+	const source = path.join(directory, "formatted-agreement.docx");
+	await createFormattedDocx(source);
+	const prepared = await prepareReviewDocumentSet({ file_path: source, user_context: "Please provide an immediate chat-only review." });
+	const result = await finalizeReviewDocument({
+		review_context_file: prepared.review_context_file,
+		perspective: "Developer",
+		findings: [{
+			anchor_text: "The Developer assigns all source code to the Client immediately.",
+			commercial_impact: "Material Commercial Risk",
+			title: "Source-code assignment",
+			explanation: "The assignment is unconditional.",
+			recommendation: "Condition assignment on payment and carve out background IP.",
+		}],
+	});
+	const zip = await JSZip.loadAsync(await readFile(result.reviewed_docx.local_path));
+	const comments = await zip.file("word/comments.xml")?.async("string");
+	const document = await zip.file("word/document.xml")?.async("string");
+	assert.match(document || "", /Unmarked formatted prefix/);
+	assert.match(document || "", /w:color w:val="006699"/);
+	assert.match(document || "", /w:i/);
+	assert.match(document || "", /w:u w:val="single"/);
+	assert.equal((comments || "").match(/The assignment is unconditional/g)?.length, 1);
+	assert.equal(result.annotation_coverage.annotated_count, 1);
+});
+
+test("document-specific review categories appear consistently in comments, cover, colours and report", async (t) => {
+	const directory = await mkdtemp(path.join(os.tmpdir(), "junior-silva-review-custom-categories-"));
+	t.after(() => rm(directory, { recursive: true, force: true }));
+	const source = path.join(directory, "pleading.txt");
+	await (await import("node:fs/promises")).writeFile(source, "The claimant failed to identify the date of the contract.\nThe claimant omitted supporting evidence.\nThe wording requires clarification.\n", "utf8");
+	const prepared = await prepareReviewDocumentSet({ file_path: source, user_context: "Please provide an immediate review." });
+	const categories = [{ name: "Legal defect", color: "red" }, { name: "Evidence gap", color: "orange" }, { name: "Drafting improvement", color: "yellow" }];
+	const findings = [
+		{ anchor_text: "The claimant failed to identify the date of the contract.", classification: "Legal defect", explanation: "Review the required date.", recommendation: "Specify the date." },
+		{ anchor_text: "The claimant omitted supporting evidence.", classification: "Evidence gap", explanation: "Evidence is absent.", recommendation: "Provide evidence." },
+		{ anchor_text: "The wording requires clarification.", classification: "Drafting improvement", explanation: "The text is unclear.", recommendation: "Clarify the text." },
+	];
+	await assert.rejects(() => finalizeReviewDocument({ review_context_file: prepared.review_context_file, categories: categories.slice(0, 2), findings }), /three distinct names/i);
+	await assert.rejects(() => finalizeReviewDocument({ review_context_file: prepared.review_context_file, categories, findings: [{ ...findings[0], classification: "Unknown" }] }), /declared category/i);
+	const result = await finalizeReviewDocument({ review_context_file: prepared.review_context_file, categories, findings });
+	const zip = await JSZip.loadAsync(await readFile(result.reviewed_docx.local_path));
+	const comments = await zip.file("word/comments.xml").async("string");
+	const document = await zip.file("word/document.xml").async("string");
+	const report = await readFile(result.review_markdown.local_path, "utf8");
+	for (const category of categories) {
+		assert.ok(comments.includes(category.name), category.name);
+		assert.ok(document.includes(category.name), category.name);
+		assert.ok(report.includes(category.name), category.name);
+	}
+	for (const color of ["FF0000", "FFC000", "FFFF00"]) assert.ok(document.includes(color), color);
+	assert.equal(result.annotation_coverage.annotated_count, 3);
 });

@@ -44,6 +44,23 @@ Object.assign(legalSourceTool.inputSchema.properties, {
 	recent_limit: { type: "integer", minimum: 1, maximum: 50, description: "For source=legislation and operation=recent_amendments: number of chronologically latest amendment instruments to return." },
 });
 
+legalSourceTool.description += " For named Acts, numbered constitutional amendments, Bills, regulations, and Gazettes, this tool can search structured Lex primary records and retrieve a selected record's title, enactment information, preamble, sections, amendment references, and official links. Use it where the exact instrument, version, or operative wording matters, including where historical Bills and enacted instruments have similar titles. Where the identity or wording of an instrument is material, weigh RAG material against the structured primary record rather than treating either source as automatically conclusive.";
+
+const ragResearchTool = tools.find((tool) => tool.name === "rag_chat_research");
+if (!ragResearchTool) throw new Error("Missing rag_chat_research MCP tool.");
+ragResearchTool.description += " RAG Chat is an analytical research source, not a substitute for reading a specific primary instrument where the request turns on its exact title, date, version, or wording. If its answer raises a possible historical naming conflict, use available source tools as needed to resolve it before presenting a conclusion.";
+
+const publicWebSearchTool = tools.find((tool) => tool.name === "web_search_public_legal_sources");
+if (!publicWebSearchTool) throw new Error("Missing web_search_public_legal_sources MCP tool.");
+publicWebSearchTool.description += " It can also confirm official Gazettes, Parliament publications, and other current primary material for a named legal instrument. When exact enactment identity or wording matters, compare returned official material with structured primary legislation records where available.";
+
+const reviewFinalizerTool = tools.find((tool) => tool.name === "review_finalize_document");
+if (!reviewFinalizerTool) throw new Error("Missing review_finalize_document MCP tool.");
+reviewFinalizerTool.description = reviewFinalizerTool.description.replace("Set compliance_status='Illegal' only with supporting Sri Lankan authority_urls; otherwise classify lawful adverse wording as commercial_impact='Material Commercial Risk' or 'Negotiation Point'.", "Define exactly three distinct review categories suited to the document and user’s purpose, each with a name and one of red, orange, yellow. Assign every finding to a declared name using classification. Support any assertion of illegality or non-compliance with appropriate authority URLs.");
+reviewFinalizerTool.inputSchema.properties.categories = { type: "array", minItems: 3, maxItems: 3, description: "Three document-appropriate category names, with red, orange and yellow each used once.", items: { type: "object", additionalProperties: false, required: ["name", "color"], properties: { name: { type: "string", minLength: 1 }, color: { type: "string", enum: ["red", "orange", "yellow"] } } } };
+reviewFinalizerTool.inputSchema.required.push("categories");
+reviewFinalizerTool.description += " Each finding must represent one distinct issue: consolidate substantially identical risk, explanation, and recommendation combinations, using issue_key where candidates describe the same issue. anchor_text must be the narrowest continuous operative wording that creates the issue; do not anchor a heading, clause label, or table title when a specific subclause, obligation, exception, consequence, or definition limb is available. For a missing protection, mark the closest meaningful insertion point and set missing_protection=true with a placement_reason; a heading is acceptable only for that documented omission case.";
+
 const handlers = new Map([
 	["review_prepare_document_set", prepareReviewDocumentSet], ["review_record_checkpoint_outcome", recordReviewCheckpointOutcome], ["review_finalize_document", finalizeReviewDocument],
 	["legal_precedent_search", searchPrecedents],

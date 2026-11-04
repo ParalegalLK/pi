@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import re
+from copy import deepcopy
 from pathlib import Path
 
 import docx
@@ -12,6 +13,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
+from docx.text.run import Run
 
 
 def clean(value):
@@ -56,7 +58,7 @@ def comment_text(finding):
         "material_commercial_risk": ("🟠", "MATERIAL COMMERCIAL RISK"),
         "negotiation_point": ("🟡", "NEGOTIATION POINT"),
     }
-    emoji, label = labels.get(classification, labels["negotiation_point"])
+    emoji, label = labels.get(classification, ("🔴" if finding.get("color", "").lower() == "red" else "🟠" if finding.get("color", "").lower() == "orange" else "🟡", finding.get("classification", "Review finding")))
     authorities = "\n".join(finding.get("authority_urls") or [])
     return "\n\n".join(part for part in [
         f"{emoji} [{label}]",
@@ -68,7 +70,12 @@ def comment_text(finding):
 
 def annotate_paragraph(paragraph, finding):
     anchor = finding.get("anchor_text", "")
-    match = best_range(paragraph.text, anchor)
+    runs = list(paragraph.runs)
+    # Work from direct Word runs rather than clearing/rebuilding the paragraph.
+    # That keeps unrelated runs, hyperlinks, paragraph properties, and table
+    # formatting intact in the reviewed copy.
+    run_text = "".join(run.text for run in runs)
+    match = best_range(run_text, anchor)
     # Extracted source anchors can span several Word paragraphs. In that case,
     # attach the comment to the most distinctive original line rather than
     # silently producing an unannotated copy of the source document.
@@ -77,43 +84,56 @@ def annotate_paragraph(paragraph, finding):
         for fragment in fragments:
             if len(fragment) < 18:
                 continue
-            match = best_range(paragraph.text, fragment)
+            match = best_range(run_text, fragment)
             if match:
                 break
     if not match:
         return False
     start, end = match
-    chars = []
-    for run in paragraph.runs:
-        for char in run.text:
-            chars.append((char, bool(run.bold), bool(run.italic)))
-    if not chars:
+    if not run_text:
         return False
     classification = str(finding.get("classification", "negotiation_point")).lower()
-    color = {
+    color = {"red": "FF0000", "orange": "FFC000", "yellow": "FFFF00"}.get(str(finding.get("color", "")).lower()) or {
         "illegal_non_compliant": "FF0000",
         "material_commercial_risk": "FFC000",
         "negotiation_point": "FFFF00",
     }.get(classification, "FFFF00")
-    paragraph.clear()
-    segment = []
-    def flush(highlight=False):
-        nonlocal segment
-        if not segment:
-            return
-        run = paragraph.add_run("".join(item[0] for item in segment))
-        run.bold = segment[0][1]
-        run.italic = segment[0][2]
-        if highlight:
-            add_shading(run, color)
-            run.add_comment(comment_text(finding), author="Junior Silva", initials="JS")
-        segment = []
-    for index, item in enumerate(chars):
-        highlighted = start <= index < end
-        if segment and ((start <= index - 1 < end) != highlighted or segment[-1][1:] != item[1:]):
-            flush(start <= index - 1 < end)
-        segment.append(item)
-    flush(start <= len(chars) - 1 < end)
+    cursor = 0
+    highlighted_runs = []
+    for source_run in runs:
+        text = source_run.text
+        run_start, run_end = cursor, cursor + len(text)
+        cursor = run_end
+        if not text or run_end <= start or run_start >= end:
+            continue
+        pieces = [
+            (text[:max(0, start - run_start)], False),
+            (text[max(0, start - run_start):min(len(text), end - run_start)], True),
+            (text[min(len(text), end - run_start):], False),
+        ]
+        replacement_nodes = []
+        for piece, highlighted in pieces:
+            if not piece:
+                continue
+            node = deepcopy(source_run._r)
+            replacement = Run(node, paragraph)
+            replacement.text = piece
+            if highlighted:
+                add_shading(replacement, color)
+                highlighted_runs.append(replacement)
+            replacement_nodes.append(node)
+        for node in replacement_nodes:
+            source_run._r.addprevious(node)
+        source_run._r.getparent().remove(source_run._r)
+    if not highlighted_runs:
+        return False
+    # One logical finding receives one Word comment, even where its highlighted
+    # text crosses several differently formatted runs.
+    document = getattr(paragraph.part, "document", None)
+    if document is not None and hasattr(document, "add_comment"):
+        document.add_comment(highlighted_runs, comment_text(finding), author="Junior Silva", initials="JS")
+    else:
+        highlighted_runs[0].add_comment(comment_text(finding), author="Junior Silva", initials="JS")
     return True
 
 
@@ -154,7 +174,7 @@ def borders(table):
     tbl_pr.append(node)
 
 
-def add_cover(document, title, perspective, findings):
+def add_cover(document, title, perspective, findings, categories=None):
     anchor = document.paragraphs[0] if document.paragraphs else document.add_paragraph()
     title_p = anchor.insert_paragraph_before(title)
     title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -177,13 +197,13 @@ def add_cover(document, title, perspective, findings):
             "material_commercial_risk": "Material Commercial Risk",
             "negotiation_point": "Negotiation Point",
         }
-        cells[1].text = labels.get(str(finding.get("classification", "")).lower(), "Negotiation Point")
+        cells[1].text = labels.get(str(finding.get("classification", "")).lower(), str(finding.get("classification", "Review finding")))
         cells[2].text = str(finding.get("clause_number", "N/A"))
         cells[3].text = str(finding.get("title", "Contractual risk"))
     anchor._p.addprevious(table._tbl)
-    anchor.insert_paragraph_before("Red Highlight = Illegal / Non-compliant under Sri Lankan law")
-    anchor.insert_paragraph_before("Orange Highlight = Material commercial risk for the selected party")
-    anchor.insert_paragraph_before("Yellow Highlight = Negotiation point (lawful but worth improving)")
+    legend = categories or [{"color": "Red", "name": "Illegal / Non-compliant under Sri Lankan law"}, {"color": "Orange", "name": "Material commercial risk for the selected party"}, {"color": "Yellow", "name": "Negotiation point (lawful but worth improving)"}]
+    for category in legend:
+        anchor.insert_paragraph_before(f"{category['color'].capitalize()} Highlight = {category['name']}")
     page = anchor.insert_paragraph_before("")
     page.add_run().add_break(WD_BREAK.PAGE)
 
@@ -225,6 +245,7 @@ def main():
     parser.add_argument("--perspective", default="")
     args = parser.parse_args()
     findings = json.loads(Path(args.findings).read_text(encoding="utf-8"))
+    categories = findings.get("categories") if isinstance(findings, dict) else None
     if isinstance(findings, dict):
         findings = findings.get("accepted", [])
     if not isinstance(findings, list):
@@ -251,7 +272,7 @@ def main():
         })
     if not (source and source.suffix.lower() == ".docx" and source.is_file()):
         add_findings_body(document, findings)
-    add_cover(document, args.title, args.perspective, findings)
+    add_cover(document, args.title, args.perspective, findings, categories)
     for section in document.sections:
         footer = section.footer.paragraphs[0]
         footer.alignment = WD_ALIGN_PARAGRAPH.CENTER

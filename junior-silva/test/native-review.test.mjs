@@ -49,6 +49,24 @@ test("native review creates a document set and accepts only source-anchored find
 	assert.match(await readFile(report.report_file, "utf8"), /No background IP carve-out/);
 });
 
+test("review validation consolidates an issue key and permits a heading only for a documented missing protection", async (t) => {
+	const fixture = await fixtureSet();
+	t.after(() => rm(fixture.directory, { recursive: true, force: true }));
+	const validated = await validateReviewFindings({
+		file_path: fixture.primary,
+		findings: [
+			{ clause_number: "6.1", anchor_text: "6.1 Intellectual Property", issue_key: "background-ip", title: "Background IP", explanation: "The agreement lacks a carve-out.", recommendation: "Add a carve-out." },
+			{ clause_number: "6.1", anchor_text: "6.1 Intellectual Property", issue_key: "background-ip", missing_protection: true, placement_reason: "The IP clause is the appropriate location for the omitted carve-out.", title: "Background IP", explanation: "The agreement lacks a carve-out.", recommendation: "Add a carve-out." },
+			{ clause_number: "6.1", anchor_text: "The Developer assigns all source code, tools and deliverables to the Client immediately.", issue_key: "background-ip", title: "Duplicate background IP risk", explanation: "The same omission also affects this assignment.", recommendation: "Add a carve-out." },
+		],
+	});
+	assert.equal(validated.rejected.length, 1);
+	assert.match(validated.rejected[0].reason, /heading only/i);
+	assert.equal(validated.accepted.length, 1);
+	assert.equal(validated.accepted[0].missing_protection, true);
+	assert.match(validated.accepted[0].placement_reason, /appropriate location/i);
+});
+
 test("two-tool review preparation and finalisation create source-grounded review artifacts", async (t) => {
 	const fixture = await fixtureSet();
 	t.after(() => rm(fixture.directory, { recursive: true, force: true }));
