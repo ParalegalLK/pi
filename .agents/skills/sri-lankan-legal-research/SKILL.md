@@ -30,6 +30,16 @@ Use `operation: "retrieve"` only after selecting a returned record when the resp
 
 Use `rag_chat_research` when the user asks what cases hold, how authorities compare, what rule applies, how a court may decide, or another synthesized legal conclusion. A catalogue result can provide candidate authorities for a later RAG-supported analysis, but it does not replace legal reasoning.
 
+## Identifying a named legal instrument
+
+A question about the text, changes, date, status, enactment, commencement, or effect of a named Act, numbered constitutional amendment, Bill, regulation, or Gazette may involve similarly named historical instruments.
+
+`legal_source_retrieve_details` can search structured Lex legislation records and read the selected instrument's title, enactment information, preamble, sections, amendment references, and official links. It is the strongest available source for identifying an exact indexed Sri Lankan instrument and its operative text.
+
+Use it when that identity or wording would materially affect the answer. `rag_chat_research` is stronger for legal analysis, authorities, judicial treatment, and synthesis. `web_search_public_legal_sources` is useful for current official publications, Gazettes, parliamentary material, or material outside the indexed corpus.
+
+When sources describe instruments with similar names, do not blend them. Compare their title, enactment or certification date, number, and operative provisions. Explain the distinction if it matters to the answer.
+
 ## Source integrity
 
 - Preserve links returned by the source for any case you cite.

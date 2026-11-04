@@ -70,27 +70,40 @@ export function clauseInventory(text) {
 	return clauses.map((item, index) => ({ ...item, index: index + 1, anchor_text: item.text.slice(0, 1600) }));
 }
 
-function normalisedFinding(value, inventory, source) {
+function normalisedFinding(value, inventory, source, categories) {
 	const item = value && typeof value === "object" ? value : {};
 	const anchor = String(item.anchor_text || item.issue_text || item.flagged_clause || "").trim();
 	const matchingClause = inventory.find((clause) => hasSourceAnchor(clause.text, anchor));
+	const missingProtection = item.missing_protection === true || String(item.missing_protection || "").toLowerCase() === "true";
+	const anchorWithoutNumber = normalized(anchor).replace(/^\d+(?:\.\d+)*\s+/, "");
+	const headingText = String(matchingClause?.heading || "").trim();
+	const likelyHeading = headingText.length <= 180 && !/[.!?;]/.test(headingText) && !/\b(?:shall|must|may|will|agrees?|liable|assigns?|pays?|provides?)\b/i.test(headingText);
+	const headingOnly = likelyHeading && (normalized(anchor) === normalized(headingText) || anchorWithoutNumber === normalized(headingText));
 	const authorityUrls = Array.isArray(item.authority_urls) ? item.authority_urls.filter((url) => typeof url === "string" && /^https?:\/\//i.test(url)) : [];
 	const compliance = normalized(item.compliance_status || item.classification);
 	const commercialImpact = normalized(item.commercial_impact || item.severity);
 	const requestedIllegal = compliance === "illegal" || compliance === "illegal / non-compliant" || /\billegal\b|non-compliant/.test(compliance);
-	const classification = requestedIllegal && authorityUrls.length
+	const legacyClassification = requestedIllegal && authorityUrls.length
 		? "illegal_non_compliant"
 		: commercialImpact === "material commercial risk" || normalized(item.classification) === "material commercial risk"
 			? "material_commercial_risk"
 			: "negotiation_point";
+	const selectedCategory = categories?.find((entry) => normalized(entry.name) === normalized(item.classification || item.category));
 	return {
-		accepted: hasSourceAnchor(source, anchor),
+		accepted: hasSourceAnchor(source, anchor) && (!headingOnly || missingProtection),
+		rejection_reason: headingOnly && !missingProtection
+			? "The proposed source anchor is a heading only. Select the operative wording beneath it, or mark it as a missing protection and explain why this is the appropriate placement point."
+			: "The proposed source anchor was not found reliably in the primary document.",
 		finding: {
 			id: createHash("sha256").update(normalized(anchor) + "\0" + normalized(item.explanation)).digest("hex").slice(0, 16),
+			issue_key: String(item.issue_key || "").trim(),
 			clause_number: String(item.clause_number || matchingClause?.clause_number || "N/A"),
 			anchor_text: anchor,
+			missing_protection: missingProtection,
+			placement_reason: String(item.placement_reason || item.anchor_rationale || "").trim(),
 			category: String(item.category || item.review_axis || "commercial").toLowerCase() === "legal" ? "legal" : "commercial",
-			classification,
+			classification: selectedCategory?.name || legacyClassification,
+			color: selectedCategory?.color,
 			severity: String(item.severity || item.commercial_impact || item.compliance_status || "negotiation point").toLowerCase(),
 			title: String(item.title || item.legal_concept || "Contractual risk").trim(),
 			explanation: String(item.explanation || "").trim(),
@@ -98,6 +111,11 @@ function normalisedFinding(value, inventory, source) {
 			authority_urls: authorityUrls,
 		},
 	};
+}
+
+function findingDeduplicationKey(finding) {
+	const issueKey = normalized(finding?.issue_key);
+	return issueKey ? `issue:${issueKey}` : `${normalized(finding?.anchor_text)}\0${finding?.classification || ""}`;
 }
 
 function likelySupporting(filename) {
@@ -279,8 +297,8 @@ export async function validateReviewFindings(args, { onProgress = () => {} } = {
 	const seen = new Set();
 	for (const candidate of args.findings) {
 		const result = normalisedFinding(candidate, inventory, source);
-		const key = normalized(result.finding.anchor_text) + "\0" + result.finding.category;
-		if (!result.accepted) rejected.push({ finding: result.finding, reason: "The proposed source anchor was not found reliably in the primary document." });
+		const key = findingDeduplicationKey(result.finding);
+		if (!result.accepted) rejected.push({ finding: result.finding, reason: result.rejection_reason });
 		else if (!seen.has(key)) {
 			seen.add(key);
 			accepted.push(result.finding);
@@ -297,13 +315,15 @@ export async function validateReviewFindings(args, { onProgress = () => {} } = {
 	};
 }
 
-function markdownReview(title, perspective, accepted) {
+function markdownReview(title, perspective, accepted, categories = []) {
 	return [
 		"# " + title, "", "**Protected party:** " + perspective, "",
+		...(categories.length ? ["## Review categories", "", ...categories.map((entry) => `- ${entry.color}: ${entry.name}`), ""] : []),
 		"## Validated findings", "",
 		...accepted.flatMap((item, index) => [
 			"### " + (index + 1) + ". " + item.title + " — Clause " + item.clause_number, "",
 			"**Source clause:** " + item.anchor_text, "",
+			...(item.missing_protection ? ["**Placement rationale:** " + (item.placement_reason || "This is the closest relevant insertion point for the missing protection."), ""] : []),
 			"**Classification:** " + item.classification.replaceAll("_", " ") + "; **severity:** " + item.severity, "",
 			item.explanation || "Further legal/commercial explanation is required.", "",
 			"**Recommended protection:** " + (item.recommendation || "Specify a negotiated amendment."), "",
@@ -312,22 +332,22 @@ function markdownReview(title, perspective, accepted) {
 	].join("\n").trim() + "\n";
 }
 
-function findingsForTarget(findings, target, targetCount) {
+function findingsForTarget(findings, target, targetCount, categories) {
 	const accepted = [];
 	const rejected = [];
 	const seen = new Set();
 	for (const candidate of findings) {
 		const requestedTarget = String(candidate?.target_id || candidate?.target_file || candidate?.source_file || "").trim();
 		if (requestedTarget && requestedTarget !== target.id && path.resolve(requestedTarget) !== path.resolve(target.file)) continue;
-		const result = normalisedFinding(candidate, target.clauses, target.source);
+		const result = normalisedFinding(candidate, target.clauses, target.source, categories);
 		const explicitOtherTarget = requestedTarget && requestedTarget !== target.id && path.resolve(requestedTarget) !== path.resolve(target.file);
 		if (explicitOtherTarget) continue;
 		if (!result.accepted) {
 			if (!requestedTarget && targetCount > 1) continue;
-			rejected.push({ finding: result.finding, reason: "The proposed source anchor was not found reliably in this review target." });
+			rejected.push({ finding: result.finding, reason: result.rejection_reason });
 			continue;
 		}
-		const key = normalized(result.finding.anchor_text) + "\0" + result.finding.classification;
+		const key = findingDeduplicationKey(result.finding);
 		if (!seen.has(key)) { seen.add(key); accepted.push(result.finding); }
 	}
 	return { accepted, rejected };
@@ -342,6 +362,11 @@ function reviewName(filename, extension) {
 export async function finalizeReviewDocument(args, { onProgress = () => {} } = {}) {
 	if (!args.review_context_file) throw new Error("review_context_file is required; first use review_prepare_document_set.");
 	if (!Array.isArray(args.findings) || !args.findings.length) throw new Error("findings must be a non-empty array.");
+	const categories = args.categories;
+	if (categories !== undefined) {
+		if (!Array.isArray(categories) || categories.length !== 3 || new Set(categories.map((c) => normalized(c?.name))).size !== 3 || categories.some((c) => !String(c?.name || "").trim()) || new Set(categories.map((c) => normalized(c?.color))).size !== 3 || categories.some((c) => !["red", "orange", "yellow"].includes(normalized(c?.color)))) throw new Error("categories must contain three distinct names and the colors red, orange and yellow exactly once.");
+		for (const finding of args.findings) if (!categories.some((c) => normalized(c.name) === normalized(finding.classification || finding.category))) throw new Error("Each finding must reference one declared category by classification or category.");
+	}
 	const context = JSON.parse(await readFile(args.review_context_file, "utf8"));
 	if (context.checkpoint?.required && context.checkpoint.status !== "completed") {
 		return {
@@ -354,7 +379,7 @@ export async function finalizeReviewDocument(args, { onProgress = () => {} } = {
 	const storedTargets = Array.isArray(context.targets) && context.targets.length ? context.targets : [{ id: "review-target-1", file: context.primary_file, filename: context.primary_filename, source_text_file: context.source_text_file, clauses: context.clauses, commercial_coverage: context.commercial_coverage }];
 	const targets = await Promise.all(storedTargets.map(async (target) => ({ ...target, source: await readFile(target.source_text_file, "utf8"), clauses: Array.isArray(target.clauses) ? target.clauses : clauseInventory(await readFile(target.source_text_file, "utf8")) })));
 	onProgress("Validating proposed findings against every selected review document…");
-	const grouped = targets.map((target) => ({ target, ...findingsForTarget(args.findings, target, targets.length) }));
+	const grouped = targets.map((target) => ({ target, ...findingsForTarget(args.findings, target, targets.length, categories) }));
 	const allAccepted = grouped.flatMap((item) => item.accepted);
 	const allRejected = grouped.flatMap((item) => item.rejected);
 	if (!allAccepted.length) throw new Error("No findings could be anchored reliably in the selected review documents. Refine exact anchor_text and, for multiple documents, identify target_id.");
@@ -363,10 +388,10 @@ export async function finalizeReviewDocument(args, { onProgress = () => {} } = {
 	const reviews = [];
 	for (const { target, accepted, rejected } of grouped) {
 		if (!accepted.length) continue;
-		const findingsFile = await saveJson(operation.directory, `${reviewName(target.filename, "")}-validated-findings.json`, { source_file: target.file, accepted, rejected });
+		const findingsFile = await saveJson(operation.directory, `${reviewName(target.filename, "")}-validated-findings.json`, { source_file: target.file, accepted, rejected, categories });
 		const title = String(args.title || `Legal Review — ${target.filename}`).trim();
 		const reportFile = path.join(operation.directory, `legal-review-${reviewName(target.filename, ".md")}`);
-		await writeFile(reportFile, markdownReview(title, perspective, accepted), "utf8");
+		await writeFile(reportFile, markdownReview(title, perspective, accepted, categories), "utf8");
 		const docxFile = path.join(operation.directory, `Reviewed_${reviewName(target.filename, ".docx")}`);
 		onProgress(`Creating the source-anchored reviewed DOCX for ${target.filename}…`);
 		const render = await renderReviewDocx({ sourceFile: target.file, sourceTextFile: target.source_text_file, findingsFile, outputFile: docxFile, title, perspective });
