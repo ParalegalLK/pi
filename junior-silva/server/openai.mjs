@@ -628,7 +628,9 @@ function finishStream(res, id, answer, usage) {
 }
 
 async function serveArtifact(res, pathname) {
-	const parts = pathname.split("/").filter(Boolean).map(decodeURIComponent);
+	let parts;
+	try { parts = pathname.split("/").filter(Boolean).map((part) => decodeURIComponent(part)); }
+	catch { return json(res, 404, { error: "Not found" }); }
 	if (parts.length !== 4 || parts[0] !== "files") return json(res, 404, { error: "Not found" });
 	const target = resolveArtifactRequest(parts[1], parts[2], parts[3]);
 	if (!target || !existsSync(target)) return json(res, 404, { error: "Not found" });
@@ -638,6 +640,8 @@ async function serveArtifact(res, pathname) {
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+// One user's failed request must not end the process serving every other user.
+process.on("unhandledRejection", (reason) => console.error(`[junior-silva-v2] Unhandled rejection: ${reason?.stack || reason}`));
 await Promise.all([mkdir(artifactsRoot, { recursive: true }), mkdir(uploadsRoot, { recursive: true }), mkdir(workspaceRoot, { recursive: true }), mkdir(SESSION_ROOT, { recursive: true }), mkdir(AGENT_ROOT, { recursive: true }), mkdir(auditRoot, { recursive: true })]);
 // Hosted mode uses an administrator-owned global MCP registration. It does not
 // bypass Pi's project-trust prompt or approve arbitrary project-local code.
@@ -659,7 +663,7 @@ const server = createServer(async (req, res) => {
 		const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
 		if (req.method === "GET" && url.pathname === "/health") return json(res, 200, { status: "ok", service: MODEL, pi: "1.0.0" });
 		if (req.method === "GET" && url.pathname === "/ready") return json(res, 200, { ready: existsSync(PI_CLI), mcp: existsSync(path.join(projectRoot, ".pi", "mcp.json")) });
-		if (req.method === "GET" && url.pathname.startsWith("/files/")) return serveArtifact(res, url.pathname);
+		if (req.method === "GET" && url.pathname.startsWith("/files/")) return await serveArtifact(res, url.pathname);
 		if (req.method === "POST" && url.pathname === "/internal/mcp") {
 			if (!loopback(req)) return json(res, 403, { error: "Local gateway only" });
 			const message = await requestBody(req);
@@ -706,4 +710,4 @@ const server = createServer(async (req, res) => {
 server.listen(PORT, HOST, () => console.log(`[junior-silva-v2] listening on ${HOST}:${PORT}`));
 }
 
-export { conversationUploadPaths, fileCandidates, messageText, piPrompt, saveUploads, splitTextEnvelope, textUploads };
+export { conversationUploadPaths, fileCandidates, messageText, piPrompt, saveUploads, serveArtifact, splitTextEnvelope, textUploads };
