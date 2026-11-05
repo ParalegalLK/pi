@@ -1,6 +1,9 @@
-import { readdir, stat } from "node:fs/promises";
+import { lstat, opendir, realpath } from "node:fs/promises";
 import path from "node:path";
+import { currentChat } from "./chat-scope.mjs";
 
+const MAX_SCAN_ENTRIES = 5000;
+const MAX_SCAN_DEPTH = 12;
 const DELIVERABLE_TYPES = new Set([".pptx", ".xlsx", ".docx", ".pdf", ".md", ".txt", ".json"]);
 const PRIMARY_ARTIFACT_ORDER = [".pptx", ".xlsx", ".docx", ".pdf", ".md", ".txt", ".json"];
 
@@ -20,31 +23,46 @@ export function requestedSlideCount(instruction = "") {
 	return match ? Number(match[1]) : undefined;
 }
 
-async function walk(directory, entries = []) {
-	let children;
-	try { children = await readdir(directory, { withFileTypes: true }); }
-	catch (error) { if (error?.code === "ENOENT") return entries; throw error; }
-	for (const child of children) {
-		const filename = path.join(directory, child.name);
-		if (child.isDirectory()) await walk(filename, entries);
-		else if (child.isFile()) entries.push(filename);
+const insideWorkspace = (file, workspace) => file.startsWith(`${workspace}${path.sep}`);
+
+// Pi can swap anything in this folder for a shortcut, so each folder's real path is
+// checked before it's read. Names are streamed, so a huge folder can't fill memory
+// before the limit applies.
+async function walk(directory, workspace, scan, depth = 0) {
+	if (depth > MAX_SCAN_DEPTH) throw new Error("The folder is nested too deeply.");
+	const real = await realpath(directory);
+	if (!insideWorkspace(real, workspace)) throw new Error("The folder is outside this chat's workspace.");
+	for await (const child of await opendir(real)) {
+		scan.entries += 1;
+		if (scan.entries > MAX_SCAN_ENTRIES) throw new Error("The folder has too many files.");
+		const filename = path.join(real, child.name);
+		if (child.isDirectory()) await walk(filename, workspace, scan, depth + 1);
+		else if (child.isFile()) scan.files.push(filename);
 	}
-	return entries;
 }
 
 // Only scan the directory allocated to the active request. This deliberately
 // never considers files created by another request or a previous conversation.
+// Any problem means no file, so the user still gets Pi's own answer.
 export async function newestRequestedArtifact(requestWorkspace, instruction) {
 	const expected = requestedArtifactExtensions(instruction);
 	if (!expected.size) return undefined;
-	const files = await walk(requestWorkspace);
-	const candidates = await Promise.all(files
-		.filter((file) => expected.has(path.extname(file).toLowerCase()) && DELIVERABLE_TYPES.has(path.extname(file).toLowerCase()))
-		.map(async (file) => ({ file, info: await stat(file) })));
-	return candidates
-		.filter(({ info }) => info.size > 0)
-		.sort((left, right) => {
-			const typeOrder = PRIMARY_ARTIFACT_ORDER.indexOf(path.extname(left.file).toLowerCase()) - PRIMARY_ARTIFACT_ORDER.indexOf(path.extname(right.file).toLowerCase());
-			return typeOrder || right.info.mtimeMs - left.info.mtimeMs;
-		})[0]?.file;
+	const chat = currentChat();
+	try {
+		const workspace = await realpath(chat.folders.workspace);
+		const scan = { entries: 0, files: [] };
+		await walk(requestWorkspace, workspace, scan);
+		const candidates = await Promise.all(scan.files
+			.filter((file) => expected.has(path.extname(file).toLowerCase()) && DELIVERABLE_TYPES.has(path.extname(file).toLowerCase()))
+			.map(async (file) => ({ file, info: await lstat(file) })));
+		const newest = candidates
+			.filter(({ info }) => info.isFile() && info.size > 0)
+			.sort((left, right) => {
+				const typeOrder = PRIMARY_ARTIFACT_ORDER.indexOf(path.extname(left.file).toLowerCase()) - PRIMARY_ARTIFACT_ORDER.indexOf(path.extname(right.file).toLowerCase());
+				return typeOrder || right.info.mtimeMs - left.info.mtimeMs;
+			})[0]?.file;
+		return newest && insideWorkspace(await realpath(newest), workspace) ? newest : undefined;
+	} catch {
+		return undefined;
+	}
 }

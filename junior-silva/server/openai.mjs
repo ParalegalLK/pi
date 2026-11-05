@@ -3,14 +3,13 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { constants, existsSync } from "node:fs";
-import { appendFile, mkdir, open, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { createChatFolders, resolveChatScope, runInChat } from "../core/chat-scope.mjs";
 import { artifactsRoot, env, projectRoot, requiredEnv } from "../core/environment.mjs";
 import { mimeType, publishWorkspaceArtifact, resolveArtifactRequest, safeFilename } from "../core/files.mjs";
 import { newestRequestedArtifact, requestedSlideCount } from "../core/artifact-delivery.mjs";
-import { preparePreview } from "../core/previews.mjs";
 import { dispatchMcpRequest } from "../mcp/server.mjs";
 import { chatForRunToken, createRunToken, revokeRunToken } from "./run-tokens.mjs";
 import { addAssistantUsage, createUsageTotals, openAiUsage, requestsStreamUsage } from "./usage.mjs";
@@ -570,6 +569,20 @@ function artifactDeliveryText(publication) {
 	return ["The requested legal work product is ready.", `## Files\n\n- [Download completed file](${url})`, markup].filter(Boolean).join("\n\n");
 }
 
+// Publishes a file Pi made but didn't deliver. Publishing goes through the file guard
+// and makes its own preview. Any problem returns nothing, so the user still gets Pi's
+// own answer instead of an error.
+async function publishRecoveredArtifact(candidate, instruction) {
+	const publication = await publishWorkspaceArtifact(candidate).catch(() => undefined);
+	if (!publication) return undefined;
+	const slides = requestedSlideCount(instruction);
+	if (slides && path.extname(candidate).toLowerCase() === ".pptx" && !new RegExp(`>${slides} slides?\\.`).test(publication.artifact_markup)) {
+		await rm(path.dirname(publication.artifact.local_path), { recursive: true, force: true });
+		return undefined;
+	}
+	return publication;
+}
+
 async function recoverUndeliveredArtifact({ instruction, chat, requestWorkspace, sessionId, initial, onProgress }) {
 	if (initial.artifactPublished) return initial;
 	let candidate = await newestRequestedArtifact(requestWorkspace, instruction);
@@ -593,10 +606,8 @@ async function recoverUndeliveredArtifact({ instruction, chat, requestWorkspace,
 	candidate = await newestRequestedArtifact(requestWorkspace, instruction);
 	if (!candidate) return initial;
 	onProgress("Preparing the completed file for secure download…");
-	const preview = await preparePreview(candidate);
-	const slides = requestedSlideCount(instruction);
-	if (slides && path.extname(candidate).toLowerCase() === ".pptx" && !new RegExp(`>${slides} slides?\\.`).test(preview.markup)) return initial;
-	const publication = await publishWorkspaceArtifact(candidate);
+	const publication = await publishRecoveredArtifact(candidate, instruction);
+	if (!publication?.artifact?.download_url) return initial;
 	return { ...initial, answer: artifactDeliveryText(publication), artifactPublished: true, recoveredArtifact: true };
 }
 
@@ -729,4 +740,4 @@ const server = createServer(async (req, res) => {
 server.listen(PORT, HOST, () => console.log(`[junior-silva-v2] listening on ${HOST}:${PORT}`));
 }
 
-export { agentEnvironment, conversationUploadPaths, fileCandidates, messageText, piPrompt, saveUploads, serveArtifact, splitTextEnvelope, textUploads };
+export { agentEnvironment, conversationUploadPaths, fileCandidates, messageText, piPrompt, publishRecoveredArtifact, saveUploads, serveArtifact, splitTextEnvelope, textUploads };
