@@ -26,6 +26,7 @@ async function createDocx(filename) {
 		"from docx import Document",
 		"import sys",
 		"d=Document()",
+		"d.sections[0].footer.paragraphs[0].text='Original confidential footer'",
 		"d.add_paragraph('6.1 Intellectual Property')",
 		"d.add_paragraph('The Developer assigns all source code, tools and deliverables to the Client immediately.')",
 		"t=d.add_table(rows=1, cols=1)",
@@ -71,11 +72,14 @@ test("native DOCX review verifies comments and highlights in body and table clau
 	const zip = await JSZip.loadAsync(await readFile(result.reviewed_docx.local_path));
 	const comments = await zip.file("word/comments.xml")?.async("string");
 	const document = await zip.file("word/document.xml")?.async("string");
+	const footer = await zip.file("word/footer1.xml")?.async("string");
 	assert.match(comments || "", /Captures existing tools/);
 	assert.match(comments || "", /No cap/);
 	assert.match(comments || "", /MATERIAL COMMERCIAL RISK/);
 	assert.match(document || "", /commentRangeStart/);
 	assert.match(document || "", /FFC000/);
+	assert.match(document || "", /🔴 Red Highlight/);
+	assert.match(footer || "", /Original confidential footer/);
 });
 
 test("native renderer uses V2/V3 classifications rather than loose severity wording", async (t) => {
