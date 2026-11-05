@@ -1,10 +1,13 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHmac } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { constants } from "node:fs";
+import { mkdir, open, readlink, realpath } from "node:fs/promises";
 import path from "node:path";
-import { booleanEnv, dataRoot, requiredEnv, uploadsRoot, workspaceRoot } from "./environment.mjs";
+import { artifactsRoot, booleanEnv, dataRoot, requiredEnv, uploadsRoot, workspaceRoot } from "./environment.mjs";
 
 const USERS_ROOT = path.join(dataRoot, "users");
+const MAX_FILE_BYTES = 50 * 1024 * 1024;
+const FILE_NOT_FOUND = "File not found in this chat.";
 const activeChat = new AsyncLocalStorage();
 const USER_ID = /^[a-f0-9]{24}$/;
 const CHAT_ID = /^[A-Za-z0-9_-]{8,128}$/;
@@ -59,9 +62,69 @@ export function currentChat() {
 	throw new Error("This tool can only run for a chat, and none is set.");
 }
 
-// True for a file inside any chat's workspace. It doesn't check which chat, or
-// follow symlinks: the chat context and path guard add that.
-export function insideChatWorkspace(file) {
-	const relative = path.relative(USERS_ROOT, path.resolve(file)).split(path.sep).join("/");
-	return /^[a-f0-9]{32}\/chats\/[a-f0-9]{32}\/workspace\/./.test(relative);
+function inside(file, roots) {
+	return roots.some((root) => file.startsWith(`${root}${path.sep}`));
+}
+
+// Never sessions. Artifacts stay shared between chats until they move per chat.
+async function allowedRoots(chat, only = ["uploads", "workspace", "artifacts"]) {
+	const folders = { uploads: chat.folders.uploads, workspace: chat.folders.workspace, artifacts: chat.folders.artifacts ?? artifactsRoot };
+	const roots = await Promise.all(only.map((name) => realpath(folders[name]).catch(() => undefined)));
+	return roots.filter(Boolean);
+}
+
+// The one way a tool opens a file named by Pi. Pi controls the path and can change
+// the file at any moment, so this checks the real path, then what was really
+// opened, and reads only from that handle. Every path failure gives the same
+// message, so Pi can't use errors to find out what exists in another chat.
+async function openChatFile(filename, { only, flags = constants.O_RDONLY } = {}) {
+	const chat = currentChat();
+	const absolute = path.resolve(String(filename));
+	const name = path.basename(absolute);
+	const refuse = (reason) => {
+		console.warn(`[junior-silva-v2] Refused a file for chat ${chat.chatHash ?? "native"}: ${reason}`);
+		return Object.assign(new Error(FILE_NOT_FOUND), { refused: true });
+	};
+	let handle;
+	try {
+		// The native CLI is one developer on their own machine, so normal reads can open any path.
+		const roots = chat.native && !only ? undefined : await allowedRoots(chat, only);
+		const real = await realpath(absolute);
+		if (roots && !inside(real, roots)) throw refuse("outside its folders");
+		// O_NONBLOCK: opening a FIFO must not hang the bridge.
+		handle = await open(real, flags | constants.O_NONBLOCK);
+		// Pi could swap the file for a symlink after the check above.
+		if (!chat.native && !inside(await readlink(`/proc/self/fd/${handle.fd}`), roots)) throw refuse("it changed while opening");
+		const info = await handle.stat();
+		if (!info.isFile()) throw refuse("not a regular file");
+		if (info.size > MAX_FILE_BYTES) throw Object.assign(new Error(`${name} exceeds the 50 MB input limit`), { refused: true });
+		const bytes = Buffer.alloc(info.size);
+		const { bytesRead } = await handle.read(bytes, 0, info.size, 0);
+		return { handle, absolute, name, bytes: bytes.subarray(0, bytesRead) };
+	} catch (caught) {
+		await handle?.close();
+		throw caught?.refused ? caught : new Error(FILE_NOT_FOUND);
+	}
+}
+
+export async function readChatFile(filename, options) {
+	const { handle, ...file } = await openChatFile(filename, options);
+	await handle.close();
+	return file;
+}
+
+export async function readChatText(filename, options) {
+	return (await readChatFile(filename, options)).bytes.toString("utf8");
+}
+
+// Reads and rewrites through one handle, so a swap can't redirect the write.
+export async function updateChatFile(filename, change, options) {
+	const { handle, bytes } = await openChatFile(filename, { ...options, flags: constants.O_RDWR });
+	try {
+		const updated = await change(bytes.toString("utf8"));
+		await handle.truncate(0);
+		await handle.write(updated, 0, "utf8");
+	} finally {
+		await handle.close();
+	}
 }

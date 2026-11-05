@@ -111,13 +111,13 @@ test("a tool call with no chat is refused", async (t) => {
 test("a tool call with a chat reaches the tool", async () => {
 	const reply = await runInChat(CHAT_A, () => callPublish("/etc/passwd"));
 	assert.equal(reply.result.isError, true);
-	assert.match(reply.result.content[0].text, /Only files created in Junior Silva's workspace can be published/);
+	assert.equal(reply.result.content[0].text, "File not found in this chat.");
 });
 
 test("a tool call on the native CLI reaches the tool", async (t) => {
 	withEnv(t, "JS_NATIVE_DEV", "1");
 	const reply = await callPublish("/etc/passwd");
-	assert.match(reply.result.content[0].text, /Only files created in Junior Silva's workspace can be published/);
+	assert.equal(reply.result.content[0].text, "File not found in this chat.");
 });
 
 test("listing tools doesn't need a chat", async (t) => {

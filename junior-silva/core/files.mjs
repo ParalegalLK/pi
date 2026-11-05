@@ -1,13 +1,12 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
-import { copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { insideChatWorkspace } from "./chat-scope.mjs";
-import { artifactsRoot, env, workspaceRoot } from "./environment.mjs";
+import { readChatFile } from "./chat-scope.mjs";
+import { artifactsRoot, env } from "./environment.mjs";
 import { download } from "./http.mjs";
 import { preparePreview } from "./previews.mjs";
 
-const MAX_INPUT_BYTES = 50 * 1024 * 1024;
 const INPUT_EXTENSIONS = new Set([".pdf", ".docx", ".doc", ".odt", ".pptx", ".xlsx", ".txt", ".md", ".json", ".png", ".jpg", ".jpeg"]);
 const MIME = new Map([
 	[".pdf", "application/pdf"],
@@ -40,14 +39,9 @@ function equalText(left, right) {
 }
 
 export async function inputFile(filename) {
-	const absolute = path.resolve(filename);
-	const info = await stat(absolute);
-	if (!info.isFile()) throw new Error(`${absolute} is not a regular file`);
-	const extension = path.extname(absolute).toLowerCase();
-	if (!INPUT_EXTENSIONS.has(extension)) throw new Error(`${path.basename(absolute)} has an unsupported file type`);
-	const bytes = await readFile(absolute);
-	if (bytes.byteLength > MAX_INPUT_BYTES) throw new Error(`${path.basename(absolute)} exceeds the 50 MB input limit`);
-	return { absolute, name: path.basename(absolute), bytes, base64: Buffer.from(bytes).toString("base64") };
+	const file = await readChatFile(filename);
+	if (!INPUT_EXTENSIONS.has(path.extname(file.name).toLowerCase())) throw new Error(`${file.name} has an unsupported file type`);
+	return { ...file, base64: file.bytes.toString("base64") };
 }
 export async function operationDirectory(prefix) {
 	const id = `${prefix}-${randomUUID()}`;
@@ -57,16 +51,13 @@ export async function operationDirectory(prefix) {
 }
 
 export async function publishWorkspaceArtifact(filename, title) {
-	const source = path.resolve(String(filename || ""));
-	if (!insideChatWorkspace(source) && !source.startsWith(`${workspaceRoot}${path.sep}`) && !source.startsWith(`${artifactsRoot}${path.sep}`)) throw new Error("Only files created in Junior Silva's workspace can be published.");
-	const info = await stat(source);
-	if (!info.isFile() || info.size > MAX_INPUT_BYTES) throw new Error("The requested artifact is not a supported publishable file.");
-	const extension = path.extname(source).toLowerCase();
+	const source = await readChatFile(filename, { only: ["workspace", "artifacts"] });
+	const extension = path.extname(source.name).toLowerCase();
 	if (!new Set([".pptx", ".xlsx", ".docx", ".pdf", ".md", ".txt", ".json"]).has(extension)) throw new Error("Only PPTX, XLSX, DOCX, PDF, Markdown, text, and JSON files can be published.");
 	const operation = await operationDirectory("artifact");
-	const name = safeFilename(title ? `${title}${extension}` : path.basename(source), `legal-artifact${extension}`);
+	const name = safeFilename(title ? `${title}${extension}` : source.name, `legal-artifact${extension}`);
 	const destination = path.join(operation.directory, name);
-	await copyFile(source, destination);
+	await writeFile(destination, source.bytes);
 	// A published document is a completed user-facing deliverable.  Generate its
 	// preview here, rather than trusting the agent to invent HTML in its reply.
 	const preview = await preparePreview(destination, title);

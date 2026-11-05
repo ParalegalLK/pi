@@ -693,10 +693,10 @@ const server = createServer(async (req, res) => {
 			await mkdir(requestWorkspace, { recursive: true });
 			if (streaming) { startStream(res, id); heartbeat = setInterval(() => res.write(": keep-alive\n\n"), 15_000); }
 			const onProgress = (message) => { if (streaming) streamDelta(res, id, "reasoning_content", `${message}\n`); };
-			const result = await serial(key, async () => {
+			const result = await serial(key, () => runInChat(chat, async () => {
 				const initial = await runPi(piPrompt(uploadText.instruction, files, requestWorkspace), `junior-silva-v2-${key}`, onProgress, chat, requestWorkspace);
 				return recoverUndeliveredArtifact({ instruction: uploadText.instruction, chat, requestWorkspace, sessionId: `junior-silva-v2-${key}`, initial, onProgress });
-			});
+			}));
 			if (heartbeat) clearInterval(heartbeat);
 			if (streaming) return finishStream(res, id, result.answer, includeStreamUsage ? result.usage : undefined);
 			return json(res, 200, { id, object: "chat.completion", created: Math.floor(Date.now() / 1000), model: MODEL, choices: [{ index: 0, message: { role: "assistant", content: result.answer }, finish_reason: "stop" }], ...(result.usage ? { usage: result.usage } : {}) });

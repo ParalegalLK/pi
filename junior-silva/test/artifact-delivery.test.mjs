@@ -9,6 +9,9 @@ import { artifactsRoot, workspaceRoot } from "../core/environment.mjs";
 import { publishWorkspaceArtifact } from "../core/files.mjs";
 import PptxGenJS from "pptxgenjs";
 
+// This file calls publishing directly on temporary files, like the native CLI does.
+process.env.JS_NATIVE_DEV = "1";
+
 test("detects requested user-facing artifact types without treating source files as deliverables", () => {
 	assert.deepEqual([...requestedArtifactExtensions("Make a four-slide PowerPoint and include the Markdown source")].sort(), [".md", ".pptx"]);
 	assert.deepEqual([...requestedArtifactExtensions("Explain the legal position in chat")], []);

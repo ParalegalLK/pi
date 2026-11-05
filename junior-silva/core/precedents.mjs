@@ -1,5 +1,6 @@
 import path from "node:path";
 import { readFile, readdir, realpath, stat } from "node:fs/promises";
+import { readChatText } from "./chat-scope.mjs";
 import { env } from "./environment.mjs";
 
 const MAX_EXCERPT_CHARS = 18_000;
@@ -82,7 +83,7 @@ export async function readPrecedent(args, { onProgress = () => {} } = {}) {
 export async function validateDraft(args, { onProgress = () => {} } = {}) {
 	if (!args.file_path) throw new Error("file_path is required");
 	onProgress("Checking the native draft for unresolved placeholders and drafting hygiene…");
-	const text = await readFile(args.file_path, "utf8");
+	const text = await readChatText(args.file_path);
 	if (!text.trim()) throw new Error("The supplied draft file is empty. Write the completed draft to the configured workspace before validating or rendering it.");
 	const flags = [];
 	for (const marker of ["[FILL]", "[ASSUMED]", "[TODO]", "TBD", "TO BE CONFIRMED"]) {

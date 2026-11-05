@@ -16,6 +16,9 @@ import {
 } from "../core/native-review.mjs";
 import { validateDraft } from "../core/precedents.mjs";
 
+// These tests call tools directly on temporary files, like the native CLI does.
+process.env.JS_NATIVE_DEV = "1";
+
 async function fixtureSet() {
 	const directory = await mkdtemp(path.join(os.tmpdir(), "junior-silva-native-review-"));
 	const primary = path.join(directory, "agreement.txt");

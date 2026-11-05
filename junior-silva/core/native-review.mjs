@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { readChatFile, readChatText, updateChatFile } from "./chat-scope.mjs";
 import { buildReviewPacket, extractDocumentText } from "./document-text.mjs";
 import { inputFile, operationDirectory, saveJson, describeArtifact, safeFilename } from "./files.mjs";
 import { renderReviewDocx } from "./review-render.mjs";
@@ -239,18 +240,17 @@ export async function recordReviewCheckpointOutcome(args, { onProgress = () => {
 	const outcome = String(args.outcome || "");
 	if (!allowed.has(outcome)) throw new Error("outcome must be review_normally, skip, or answered.");
 	onProgress("Recording the user’s review-evidence decision…");
-	const context = JSON.parse(await readFile(args.review_context_file, "utf8"));
-	context.checkpoint = {
+	const checkpoint = {
 		required: true,
 		status: "completed",
 		outcome,
 		user_response: String(args.user_response || "").trim().slice(0, 4000),
 		completed_at: new Date().toISOString(),
 	};
-	await writeFile(args.review_context_file, `${JSON.stringify(context, null, 2)}\n`, "utf8");
+	await updateChatFile(args.review_context_file, (text) => `${JSON.stringify({ ...JSON.parse(text), checkpoint }, null, 2)}\n`, { only: ["artifacts"] });
 	return {
 		review_context_file: args.review_context_file,
-		checkpoint: context.checkpoint,
+		checkpoint,
 		instruction: outcome === "answered"
 			? "Use the user's answer and any supplied supporting document. If new documents were supplied, prepare a fresh combined document set before finalising."
 			: "The user chose to proceed without further evidence. Complete needed research and finalise the source-grounded review.",
@@ -342,7 +342,7 @@ function reviewName(filename, extension) {
 export async function finalizeReviewDocument(args, { onProgress = () => {} } = {}) {
 	if (!args.review_context_file) throw new Error("review_context_file is required; first use review_prepare_document_set.");
 	if (!Array.isArray(args.findings) || !args.findings.length) throw new Error("findings must be a non-empty array.");
-	const context = JSON.parse(await readFile(args.review_context_file, "utf8"));
+	const context = JSON.parse(await readChatText(args.review_context_file, { only: ["artifacts"] }));
 	if (context.checkpoint?.required && context.checkpoint.status !== "completed") {
 		return {
 			completion: "review-awaiting-evidence-checkpoint",
@@ -352,7 +352,10 @@ export async function finalizeReviewDocument(args, { onProgress = () => {} } = {
 		};
 	}
 	const storedTargets = Array.isArray(context.targets) && context.targets.length ? context.targets : [{ id: "review-target-1", file: context.primary_file, filename: context.primary_filename, source_text_file: context.source_text_file, clauses: context.clauses, commercial_coverage: context.commercial_coverage }];
-	const targets = await Promise.all(storedTargets.map(async (target) => ({ ...target, source: await readFile(target.source_text_file, "utf8"), clauses: Array.isArray(target.clauses) ? target.clauses : clauseInventory(await readFile(target.source_text_file, "utf8")) })));
+	const targets = await Promise.all(storedTargets.map(async (target) => {
+		const source = await readChatText(target.source_text_file);
+		return { ...target, source, clauses: Array.isArray(target.clauses) ? target.clauses : clauseInventory(source) };
+	}));
 	onProgress("Validating proposed findings against every selected review document…");
 	const grouped = targets.map((target) => ({ target, ...findingsForTarget(args.findings, target, targets.length) }));
 	const allAccepted = grouped.flatMap((item) => item.accepted);
@@ -361,7 +364,7 @@ export async function finalizeReviewDocument(args, { onProgress = () => {} } = {
 	const operation = await operationDirectory("review-final");
 	const perspective = String(args.perspective || "Not specified").trim();
 	const reviews = [];
-	for (const { target, accepted, rejected } of grouped) {
+	for (const [index, { target, accepted, rejected }] of grouped.entries()) {
 		if (!accepted.length) continue;
 		const findingsFile = await saveJson(operation.directory, `${reviewName(target.filename, "")}-validated-findings.json`, { source_file: target.file, accepted, rejected });
 		const title = String(args.title || `Legal Review — ${target.filename}`).trim();
@@ -369,7 +372,14 @@ export async function finalizeReviewDocument(args, { onProgress = () => {} } = {
 		await writeFile(reportFile, markdownReview(title, perspective, accepted), "utf8");
 		const docxFile = path.join(operation.directory, `Reviewed_${reviewName(target.filename, ".docx")}`);
 		onProgress(`Creating the source-anchored reviewed DOCX for ${target.filename}…`);
-		const render = await renderReviewDocx({ sourceFile: target.file, sourceTextFile: target.source_text_file, findingsFile, outputFile: docxFile, title, perspective });
+		// The renderer opens files by path, so it gets copies only the bridge can change.
+		const original = await readChatFile(target.file);
+		const sourceCopy = path.join(operation.directory, `source-${index + 1}${path.extname(original.name)}`);
+		const sourceTextCopy = path.join(operation.directory, `source-text-${index + 1}.txt`);
+		await writeFile(sourceCopy, original.bytes);
+		await writeFile(sourceTextCopy, target.source, "utf8");
+		const render = await renderReviewDocx({ sourceFile: sourceCopy, sourceTextFile: sourceTextCopy, findingsFile, outputFile: docxFile, title, perspective })
+			.finally(() => Promise.all([rm(sourceCopy, { force: true }), rm(sourceTextCopy, { force: true })]));
 		const annotation = JSON.parse(render.stdout || "{}");
 		if (annotation.annotated_count !== accepted.length) throw new Error(`Reviewed DOCX annotation coverage is incomplete for ${target.filename} (${annotation.annotated_count || 0}/${accepted.length}). Refine anchor_text before finalising.`);
 		const preview = await preparePreview(docxFile, `Reviewed ${path.basename(target.filename, path.extname(target.filename))}`);
@@ -415,7 +425,7 @@ export async function auditCommercialCoverage(args, { onProgress = () => {} } = 
 export async function renderReviewReport(args, { onProgress = () => {} } = {}) {
 	if (!args.findings_file) throw new Error("findings_file is required");
 	onProgress("Preparing validated native review findings for document rendering…");
-	const findings = JSON.parse(await readFile(args.findings_file, "utf8"));
+	const findings = JSON.parse(await readChatText(args.findings_file));
 	const accepted = Array.isArray(findings.accepted) ? findings.accepted : [];
 	const operation = await operationDirectory("native-review-report");
 	const reportFile = path.join(operation.directory, "native-review-report.md");

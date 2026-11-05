@@ -12,7 +12,7 @@ process.env.JUNIOR_SILVA_WORKSPACE_ROOT = path.join(dataRoot, "workspace");
 process.env.JUNIOR_SILVA_PUBLIC_URL = "https://example.test";
 process.env.JUNIOR_SILVA_API_KEY ||= "test-junior-silva-key";
 
-const { chatFolders, createChatFolders, insideChatWorkspace } = await import("../core/chat-scope.mjs");
+const { chatFolders, createChatFolders, runInChat } = await import("../core/chat-scope.mjs");
 const { publishWorkspaceArtifact } = await import("../core/files.mjs");
 const { agentEnvironment } = await import("../server/openai.mjs");
 
@@ -54,27 +54,6 @@ test("creating a chat's folders makes them private and keeps what's already ther
 	assert.equal(await readFile(kept, "utf8"), "history");
 });
 
-test("insideChatWorkspace accepts only files in a chat's workspace", () => {
-	const { root, uploads, workspace, sessions } = chatFolders(scope);
-	assert.equal(insideChatWorkspace(path.join(workspace, "draft.docx")), true);
-	assert.equal(insideChatWorkspace(path.join(workspace, "requests", "r1", "nested", "draft.docx")), true);
-
-	const refused = [
-		workspace,
-		path.join(uploads, "contract.pdf"),
-		path.join(sessions, "session.jsonl"),
-		path.join(root, "draft.docx"),
-		`${workspace}/../uploads/contract.pdf`,
-		`${workspace}/../../../../${OTHER_USER}/chats/${CHAT}/uploads/contract.pdf`,
-		path.join(dataRoot, "users", "abc", "chats", CHAT, "workspace", "draft.docx"),
-		path.join(dataRoot, "users", USER, "chats", "abc", "workspace", "draft.docx"),
-		path.join(dataRoot, "users", USER.toUpperCase(), "chats", CHAT, "workspace", "draft.docx"),
-		path.join(dataRoot, "workspace", "draft.docx"),
-		"/etc/passwd",
-	];
-	for (const file of refused) assert.equal(insideChatWorkspace(file), false, file);
-});
-
 test("Pi's session and upload settings point at this chat", () => {
 	const folders = chatFolders(scope);
 	const requestWorkspace = path.join(folders.workspace, "requests", "r1");
@@ -85,18 +64,21 @@ test("Pi's session and upload settings point at this chat", () => {
 });
 
 test("a file in a chat's workspace publishes, and a file in its other folders doesn't", async () => {
-	const folders = await createChatFolders({ userHash: USER, chatHash: "f".repeat(32) });
+	const chatScope = { userHash: USER, chatHash: "f".repeat(32) };
+	const folders = await createChatFolders(chatScope);
 	const requestWorkspace = path.join(folders.workspace, "requests", "r1");
 	await mkdir(requestWorkspace, { recursive: true });
 	const draft = path.join(requestWorkspace, "note.md");
 	await writeFile(draft, "# Test note\n\nA short test note.\n");
 
-	const publication = await publishWorkspaceArtifact(draft);
-	assert.match(publication.artifact.download_url, /^https:\/\/example\.test\/files\//);
+	await runInChat({ ...chatScope, folders }, async () => {
+		const publication = await publishWorkspaceArtifact(draft);
+		assert.match(publication.artifact.download_url, /^https:\/\/example\.test\/files\//);
 
-	for (const directory of [folders.uploads, folders.sessions]) {
-		const file = path.join(directory, "note.md");
-		await writeFile(file, "# Test note\n");
-		await assert.rejects(publishWorkspaceArtifact(file), /Only files created in Junior Silva's workspace can be published/);
-	}
+		for (const directory of [folders.uploads, folders.sessions]) {
+			const file = path.join(directory, "note.md");
+			await writeFile(file, "# Test note\n");
+			await assert.rejects(publishWorkspaceArtifact(file), /File not found in this chat/);
+		}
+	});
 });
