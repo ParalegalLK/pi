@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHmac } from "node:crypto";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -197,7 +198,7 @@ test("the running server enforces the checks before doing any work", async (t) =
 	assert.equal(wrongUser.status, 400);
 	assert.equal((await wrongUser.json()).error.message, WRONG_USER);
 
-	assert.deepEqual(await readdir(path.join(root, "uploads")), [], "a refused request must not save anything");
+	assert.equal(existsSync(path.join(root, "users")), false, "a refused request must not save anything");
 
 	const noKey = await post({ "Content-Type": "application/json" }, upload);
 	assert.equal(noKey.status, 401);
@@ -209,6 +210,7 @@ test("the running server enforces the checks before doing any work", async (t) =
 	const valid = await post({ ...authorization, ...ids(USER_A, CHAT) }, { user: USER_A, messages: [] });
 	assert.equal(valid.status, 400);
 	assert.equal((await valid.json()).error.message, "A user message or document is required");
+	assert.equal(existsSync(path.join(root, "users")), false, "an empty request must not create chat folders");
 
 	assert.equal((await fetch(`${base}/health`)).status, 200);
 });

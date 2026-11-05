@@ -6,8 +6,8 @@ import { existsSync } from "node:fs";
 import { appendFile, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { resolveChatScope } from "../core/chat-scope.mjs";
-import { artifactsRoot, env, projectRoot, requiredEnv, uploadsRoot, workspaceRoot } from "../core/environment.mjs";
+import { createChatFolders, resolveChatScope } from "../core/chat-scope.mjs";
+import { artifactsRoot, env, projectRoot, requiredEnv } from "../core/environment.mjs";
 import { mimeType, publishWorkspaceArtifact, resolveArtifactRequest, safeFilename } from "../core/files.mjs";
 import { newestRequestedArtifact, requestedSlideCount } from "../core/artifact-delivery.mjs";
 import { preparePreview } from "../core/previews.mjs";
@@ -20,7 +20,6 @@ const MODEL = env("JUNIOR_SILVA_MODEL_NAME", "junior-silva-v2");
 const API_KEY = requiredEnv("JUNIOR_SILVA_API_KEY");
 const MAX_BODY = Number(env("JUNIOR_SILVA_MAX_BODY_BYTES", String(60 * 1024 * 1024)));
 const MAX_FILE = Number(env("JUNIOR_SILVA_MAX_FILE_BYTES", String(50 * 1024 * 1024)));
-const SESSION_ROOT = path.join(path.dirname(artifactsRoot), "sessions");
 const AGENT_ROOT = path.resolve(env("PI_CODING_AGENT_DIR", path.join(path.dirname(artifactsRoot), "pi-agent")));
 const PI_CLI = path.join(projectRoot, "packages", "coding-agent", "dist", "bundle", "cli.js");
 const ATTACHMENT_ORIGINS = new Set(env("JUNIOR_SILVA_ATTACHMENT_ORIGINS").split(",").map((item) => item.trim()).filter(Boolean));
@@ -172,8 +171,7 @@ async function retainUpload(directory, manifest, { bytes, filename, sourceId = "
 	return { path: target, isNew };
 }
 
-async function saveUploads(key, candidates, extracted) {
-	const directory = path.join(uploadsRoot, key);
+async function saveUploads(directory, candidates, extracted) {
 	await mkdir(directory, { recursive: true });
 	const manifest = await loadUploadManifest(directory);
 	const paths = [];
@@ -195,8 +193,7 @@ async function saveUploads(key, candidates, extracted) {
 	return paths;
 }
 
-async function conversationUploadPaths(key) {
-	const directory = path.join(uploadsRoot, key);
+async function conversationUploadPaths(directory) {
 	try {
 		const entries = await readdir(directory, { withFileTypes: true });
 		return entries.filter((entry) => entry.isFile() && !entry.name.startsWith(".")).map((entry) => path.join(directory, entry.name)).sort();
@@ -401,20 +398,20 @@ function safeAuditToolName(toolName) {
 			/^(write|edit|create_file|apply_patch)$/i.test(raw) ? "builtin_write" : "builtin_or_unrecognized");
 }
 
-function agentEnvironment(requestWorkspace = workspaceRoot) {
+function agentEnvironment(folders, requestWorkspace) {
 	const output = {
 		PATH: process.env.PATH || "",
 		HOME: process.env.HOME || "",
 		LANG: process.env.LANG || "C.UTF-8",
 		TERM: process.env.TERM || "xterm-256color",
 		TZ: "Asia/Colombo",
-		PI_CODING_AGENT_SESSION_DIR: SESSION_ROOT,
+		PI_CODING_AGENT_SESSION_DIR: folders.sessions,
 		PI_CODING_AGENT_DIR: AGENT_ROOT,
 		PI_SKIP_VERSION_CHECK: "1",
 		JUNIOR_SILVA_MCP_GATEWAY_URL: `http://127.0.0.1:${PORT}/internal/mcp`,
 		JUNIOR_SILVA_DATA_ROOT: path.dirname(artifactsRoot),
 		JUNIOR_SILVA_ARTIFACT_ROOT: artifactsRoot,
-		JUNIOR_SILVA_UPLOAD_ROOT: uploadsRoot,
+		JUNIOR_SILVA_UPLOAD_ROOT: folders.uploads,
 		JUNIOR_SILVA_WORKSPACE_ROOT: requestWorkspace,
 	};
 	const provider = env("PI_PROVIDER", "google");
@@ -433,13 +430,13 @@ async function audit(sessionId, event) {
 	await appendFile(path.join(auditRoot, `${sessionId}.jsonl`), `${line}\n`, "utf8");
 }
 
-async function sessionFileSizes() {
+async function sessionFileSizes(directory) {
 	const sizes = new Map();
 	try {
-		const entries = await readdir(SESSION_ROOT, { withFileTypes: true });
+		const entries = await readdir(directory, { withFileTypes: true });
 		for (const entry of entries) {
 			if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
-			const file = path.join(SESSION_ROOT, entry.name);
+			const file = path.join(directory, entry.name);
 			sizes.set(file, (await stat(file)).size);
 		}
 	} catch (caught) {
@@ -448,14 +445,14 @@ async function sessionFileSizes() {
 	return sizes;
 }
 
-async function appendedSessionUsage(sizesBefore) {
+async function appendedSessionUsage(directory, sizesBefore) {
 	const totals = createUsageTotals();
 	let changedFiles = 0;
 	try {
-		const entries = await readdir(SESSION_ROOT, { withFileTypes: true });
+		const entries = await readdir(directory, { withFileTypes: true });
 		for (const entry of entries) {
 			if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
-			const file = path.join(SESSION_ROOT, entry.name);
+			const file = path.join(directory, entry.name);
 			const offset = sizesBefore.get(file) || 0;
 			if ((await stat(file)).size <= offset) continue;
 			changedFiles += 1;
@@ -474,7 +471,7 @@ async function appendedSessionUsage(sizesBefore) {
 	return changedFiles === 1 ? totals : undefined;
 }
 
-async function runPi(prompt, sessionId, onProgress, requestWorkspace = workspaceRoot) {
+async function runPi(prompt, sessionId, onProgress, folders, requestWorkspace) {
 	// Hosted Pi uses administrator-owned legal MCP registration. Its normal built-in
 	// tools remain subject to the legal-scope extension and deployment sandbox.
 	const args = [
@@ -491,12 +488,11 @@ async function runPi(prompt, sessionId, onProgress, requestWorkspace = workspace
 	if (env("PI_MODEL")) args.push("--model", env("PI_MODEL"));
 	if (env("PI_THINKING")) args.push("--thinking", env("PI_THINKING"));
 	args.push(prompt);
-	await mkdir(SESSION_ROOT, { recursive: true });
-	const sessionSizesBefore = await sessionFileSizes();
+	const sessionSizesBefore = await sessionFileSizes(folders.sessions);
 	const startedAt = Date.now();
 	const thoughtController = createThoughtController(onProgress);
 	return new Promise((resolve, reject) => {
-		const child = spawn(process.execPath, args, { cwd: projectRoot, env: agentEnvironment(requestWorkspace), stdio: ["ignore", "pipe", "pipe"] });
+		const child = spawn(process.execPath, args, { cwd: projectRoot, env: agentEnvironment(folders, requestWorkspace), stdio: ["ignore", "pipe", "pipe"] });
 		// The service-level SSE keepalive is intentionally invisible. This bounded
 		// timer is different: it tells the user that Pi is still alive when a
 		// legitimate document or research step produces no lifecycle event.
@@ -553,7 +549,7 @@ async function runPi(prompt, sessionId, onProgress, requestWorkspace = workspace
 			clearInterval(thoughtLivenessTimer);
 			if (code !== 0) return reject(new Error(`Pi exited with code ${code}: ${stderr.replace(/\s+/g, " ").slice(0, 1200)}`));
 			if (!finalText.trim()) return reject(new Error("Pi returned no final answer"));
-			void appendedSessionUsage(sessionSizesBefore).then((persistedUsage) => {
+			void appendedSessionUsage(folders.sessions, sessionSizesBefore).then((persistedUsage) => {
 				resolve({ answer: finalText.trim(), usage: openAiUsage(persistedUsage) || openAiUsage(usageTotals), elapsedMs: Date.now() - startedAt, artifactPublished });
 			}).catch(reject);
 		});
@@ -567,7 +563,7 @@ function artifactDeliveryText(publication) {
 	return ["The requested legal work product is ready.", `## Files\n\n- [Download completed file](${url})`, markup].filter(Boolean).join("\n\n");
 }
 
-async function recoverUndeliveredArtifact({ instruction, requestWorkspace, sessionId, initial, onProgress }) {
+async function recoverUndeliveredArtifact({ instruction, folders, requestWorkspace, sessionId, initial, onProgress }) {
 	if (initial.artifactPublished) return initial;
 	let candidate = await newestRequestedArtifact(requestWorkspace, instruction);
 	if (!candidate) return initial;
@@ -580,6 +576,7 @@ async function recoverUndeliveredArtifact({ instruction, requestWorkspace, sessi
 		`A requested deliverable exists in this request workspace but has not been delivered. Inspect only ${candidate}. If it needs correction, correct and validate it. Then call workbench_publish_artifact for the final file and finish with a concise delivery confirmation. Do not repeat legal research or return an internal progress note.`,
 		sessionId,
 		onProgress,
+		folders,
 		requestWorkspace,
 	).catch(() => undefined);
 	if (repair?.artifactPublished) return repair;
@@ -638,7 +635,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
 requiredEnv("JS_IDENTITY_SECRET");
 // One user's failed request must not end the process serving every other user.
 process.on("unhandledRejection", (reason) => console.error(`[junior-silva-v2] Unhandled rejection: ${reason?.stack || reason}`));
-await Promise.all([mkdir(artifactsRoot, { recursive: true }), mkdir(uploadsRoot, { recursive: true }), mkdir(workspaceRoot, { recursive: true }), mkdir(SESSION_ROOT, { recursive: true }), mkdir(AGENT_ROOT, { recursive: true }), mkdir(auditRoot, { recursive: true })]);
+await Promise.all([mkdir(artifactsRoot, { recursive: true }), mkdir(AGENT_ROOT, { recursive: true }), mkdir(auditRoot, { recursive: true })]);
 // Hosted mode uses an administrator-owned global MCP registration. It does not
 // bypass Pi's project-trust prompt or approve arbitrary project-local code.
 await writeFile(path.join(AGENT_ROOT, "mcp.json"), `${JSON.stringify({
@@ -671,22 +668,24 @@ const server = createServer(async (req, res) => {
 		if (req.method === "GET" && url.pathname === "/v1/models") return json(res, 200, { object: "list", data: [{ id: MODEL, object: "model", created: 0, owned_by: "paralegal.lk" }] });
 		if (req.method === "POST" && url.pathname === "/v1/chat/completions") {
 			const body = await requestBody(req);
-			const { chatHash: key } = resolveChatScope(req.headers, body);
+			const scope = resolveChatScope(req.headers, body);
+			const key = scope.chatHash;
 			const messages = Array.isArray(body.messages) ? body.messages : [];
 			const uploadText = textUploads(messages);
 			const candidates = fileCandidates(body);
 			if (!uploadText.instruction && !uploadText.files.length && !candidates.length) return json(res, 400, { error: { message: "A user message or document is required", type: "invalid_request_error" } });
-			const files = await saveUploads(key, candidates, uploadText.files);
+			const folders = await createChatFolders(scope);
+			const files = await saveUploads(folders.uploads, candidates, uploadText.files);
 			const id = `chatcmpl-${randomUUID()}`;
 			const streaming = body.stream !== false;
 			const includeStreamUsage = requestsStreamUsage(body);
-			const requestWorkspace = path.join(workspaceRoot, "requests", key, id);
+			const requestWorkspace = path.join(folders.workspace, "requests", id);
 			await mkdir(requestWorkspace, { recursive: true });
 			if (streaming) { startStream(res, id); heartbeat = setInterval(() => res.write(": keep-alive\n\n"), 15_000); }
 			const onProgress = (message) => { if (streaming) streamDelta(res, id, "reasoning_content", `${message}\n`); };
 			const result = await serial(key, async () => {
-				const initial = await runPi(piPrompt(uploadText.instruction, files, requestWorkspace), `junior-silva-v2-${key}`, onProgress, requestWorkspace);
-				return recoverUndeliveredArtifact({ instruction: uploadText.instruction, requestWorkspace, sessionId: `junior-silva-v2-${key}`, initial, onProgress });
+				const initial = await runPi(piPrompt(uploadText.instruction, files, requestWorkspace), `junior-silva-v2-${key}`, onProgress, folders, requestWorkspace);
+				return recoverUndeliveredArtifact({ instruction: uploadText.instruction, folders, requestWorkspace, sessionId: `junior-silva-v2-${key}`, initial, onProgress });
 			});
 			if (heartbeat) clearInterval(heartbeat);
 			if (streaming) return finishStream(res, id, result.answer, includeStreamUsage ? result.usage : undefined);
@@ -706,4 +705,4 @@ const server = createServer(async (req, res) => {
 server.listen(PORT, HOST, () => console.log(`[junior-silva-v2] listening on ${HOST}:${PORT}`));
 }
 
-export { conversationUploadPaths, fileCandidates, messageText, piPrompt, saveUploads, serveArtifact, splitTextEnvelope, textUploads };
+export { agentEnvironment, conversationUploadPaths, fileCandidates, messageText, piPrompt, saveUploads, serveArtifact, splitTextEnvelope, textUploads };

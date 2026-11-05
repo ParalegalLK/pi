@@ -2,6 +2,7 @@ import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { insideChatWorkspace } from "./chat-scope.mjs";
 import { artifactsRoot, env, workspaceRoot } from "./environment.mjs";
 import { download } from "./http.mjs";
 import { preparePreview } from "./previews.mjs";
@@ -57,7 +58,7 @@ export async function operationDirectory(prefix) {
 
 export async function publishWorkspaceArtifact(filename, title) {
 	const source = path.resolve(String(filename || ""));
-	if (!source.startsWith(`${workspaceRoot}${path.sep}`) && !source.startsWith(`${artifactsRoot}${path.sep}`)) throw new Error("Only files created in Junior Silva's workspace can be published.");
+	if (!insideChatWorkspace(source) && !source.startsWith(`${workspaceRoot}${path.sep}`) && !source.startsWith(`${artifactsRoot}${path.sep}`)) throw new Error("Only files created in Junior Silva's workspace can be published.");
 	const info = await stat(source);
 	if (!info.isFile() || info.size > MAX_INPUT_BYTES) throw new Error("The requested artifact is not a supported publishable file.");
 	const extension = path.extname(source).toLowerCase();

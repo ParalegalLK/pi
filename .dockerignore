@@ -8,6 +8,7 @@ junior-silva/sessions
 junior-silva/audit
 junior-silva/pi-agent
 junior-silva/workspace
+junior-silva/users
 *.log
 .vscode
 .idea
