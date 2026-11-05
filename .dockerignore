@@ -11,3 +11,5 @@ junior-silva/workspace
 *.log
 .vscode
 .idea
+scripts/js-*
+scripts/spike
