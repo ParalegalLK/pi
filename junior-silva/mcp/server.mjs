@@ -12,6 +12,7 @@ import { research } from "../services/rag.mjs";
 import { translateDocument, translateText } from "../services/translator.mjs";
 import { searchPublicLegalSources } from "../services/web.mjs";
 import { runDataCode } from "../services/code-runner.mjs";
+import { currentChat } from "../core/chat-scope.mjs";
 import { publishWorkspaceArtifact } from "../core/files.mjs";
 import { retrieveLegalSourceDetails } from "../core/typesense-legal-sources.mjs";
 
@@ -119,6 +120,7 @@ export async function dispatchMcpRequest(message, { onProgress = () => {} } = {}
 		const handler = handlers.get(message.params?.name);
 		if (!handler) return rpcError(-32602, `Unknown tool: ${message.params?.name}`);
 		try {
+			currentChat(); // A tool call with no chat is refused, so tools can rely on having one.
 			const toolProgress = progressReporter(message.params?._meta?.progressToken, onProgress);
 			const output = await handler(message.params?.arguments || {}, { onProgress: toolProgress });
 			return response({ content: [{ type: "text", text: JSON.stringify(compactToolResult(message.params?.name, output), null, 2) }], structuredContent: output });

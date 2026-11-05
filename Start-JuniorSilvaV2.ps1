@@ -13,6 +13,7 @@ foreach ($name in @('GEMINI_API_KEY', 'ANTHROPIC_API_KEY')) { if ($pairs[$name])
 $workspaceRoot = if ($pairs['JUNIOR_SILVA_WORKSPACE_ROOT']) { $pairs['JUNIOR_SILVA_WORKSPACE_ROOT'] } else { Join-Path $PSScriptRoot 'junior-silva\workspace' }
 New-Item -ItemType Directory -Force -Path $workspaceRoot | Out-Null
 Set-Item -Path 'Env:JUNIOR_SILVA_WORKSPACE_ROOT' -Value $workspaceRoot
+Set-Item -Path 'Env:JS_NATIVE_DEV' -Value '1'
 foreach ($name in @('JUNIOR_SILVA_KB_ROOT', 'JUNIOR_SILVA_DATA_ROOT', 'JUNIOR_SILVA_ARTIFACT_ROOT', 'JUNIOR_SILVA_UPLOAD_ROOT')) {
     if ($pairs[$name]) { Set-Item -Path "Env:$name" -Value $pairs[$name] }
 }

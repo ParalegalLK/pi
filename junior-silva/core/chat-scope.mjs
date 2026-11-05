@@ -1,9 +1,11 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHmac } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
-import { dataRoot, requiredEnv } from "./environment.mjs";
+import { booleanEnv, dataRoot, requiredEnv, uploadsRoot, workspaceRoot } from "./environment.mjs";
 
 const USERS_ROOT = path.join(dataRoot, "users");
+const activeChat = new AsyncLocalStorage();
 const USER_ID = /^[a-f0-9]{24}$/;
 const CHAT_ID = /^[A-Za-z0-9_-]{8,128}$/;
 const PLACEHOLDER_CHAT_IDS = new Set(["new", "null", "undefined", "PENDING"]);
@@ -40,6 +42,21 @@ export async function createChatFolders(scope) {
 	const folders = chatFolders(scope);
 	await Promise.all([folders.uploads, folders.workspace, folders.sessions].map((directory) => mkdir(directory, { recursive: true, mode: 0o700 })));
 	return folders;
+}
+
+// Runs a tool call for one chat. Tools read the chat with currentChat(), so they
+// don't need a chat argument, and two calls at once can't see each other's chat.
+export function runInChat(chat, task) {
+	return activeChat.run(chat, task);
+}
+
+// A chat comes from runInChat, or from an explicit native CLI setting on one
+// developer's machine. Anything else is an error, never a shared folder.
+export function currentChat() {
+	const chat = activeChat.getStore();
+	if (chat) return chat;
+	if (booleanEnv("JS_NATIVE_DEV")) return { native: true, folders: { uploads: uploadsRoot, workspace: workspaceRoot } };
+	throw new Error("This tool can only run for a chat, and none is set.");
 }
 
 // True for a file inside any chat's workspace. It doesn't check which chat, or

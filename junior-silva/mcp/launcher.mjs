@@ -3,13 +3,14 @@ import readline from "node:readline";
 import { dispatchMcpRequest } from "./server.mjs";
 
 const gateway = String(process.env.JUNIOR_SILVA_MCP_GATEWAY_URL || "").trim();
+const runToken = String(process.env.JS_RUN_TOKEN || "").trim();
 const lines = readline.createInterface({ input: process.stdin, crlfDelay: Number.POSITIVE_INFINITY });
 
 async function forward(message) {
 	if (!gateway) return dispatchMcpRequest(message, { onProgress: send });
 	const response = await fetch(gateway, {
 		method: "POST",
-		headers: { "Content-Type": "application/json" },
+		headers: { "Content-Type": "application/json", ...(runToken ? { Authorization: `Bearer ${runToken}` } : {}) },
 		body: JSON.stringify(message),
 		signal: AbortSignal.timeout(1_220_000),
 	});

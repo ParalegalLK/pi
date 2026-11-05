@@ -6,12 +6,13 @@ import { existsSync } from "node:fs";
 import { appendFile, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { createChatFolders, resolveChatScope } from "../core/chat-scope.mjs";
+import { createChatFolders, resolveChatScope, runInChat } from "../core/chat-scope.mjs";
 import { artifactsRoot, env, projectRoot, requiredEnv } from "../core/environment.mjs";
 import { mimeType, publishWorkspaceArtifact, resolveArtifactRequest, safeFilename } from "../core/files.mjs";
 import { newestRequestedArtifact, requestedSlideCount } from "../core/artifact-delivery.mjs";
 import { preparePreview } from "../core/previews.mjs";
 import { dispatchMcpRequest } from "../mcp/server.mjs";
+import { chatForRunToken, createRunToken, revokeRunToken } from "./run-tokens.mjs";
 import { addAssistantUsage, createUsageTotals, openAiUsage, requestsStreamUsage } from "./usage.mjs";
 
 const PORT = Number(env("JUNIOR_SILVA_PORT", "8126"));
@@ -31,9 +32,12 @@ function json(res, status, value) {
 	res.end(body);
 }
 
+function bearerToken(req) {
+	return String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+}
+
 function authorized(req) {
-	const supplied = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
-	const left = Buffer.from(supplied);
+	const left = Buffer.from(bearerToken(req));
 	const right = Buffer.from(API_KEY);
 	return left.length === right.length && timingSafeEqual(left, right);
 }
@@ -398,7 +402,7 @@ function safeAuditToolName(toolName) {
 			/^(write|edit|create_file|apply_patch)$/i.test(raw) ? "builtin_write" : "builtin_or_unrecognized");
 }
 
-function agentEnvironment(folders, requestWorkspace) {
+function agentEnvironment(folders, requestWorkspace, runToken) {
 	const output = {
 		PATH: process.env.PATH || "",
 		HOME: process.env.HOME || "",
@@ -409,6 +413,7 @@ function agentEnvironment(folders, requestWorkspace) {
 		PI_CODING_AGENT_DIR: AGENT_ROOT,
 		PI_SKIP_VERSION_CHECK: "1",
 		JUNIOR_SILVA_MCP_GATEWAY_URL: `http://127.0.0.1:${PORT}/internal/mcp`,
+		JS_RUN_TOKEN: runToken,
 		JUNIOR_SILVA_DATA_ROOT: path.dirname(artifactsRoot),
 		JUNIOR_SILVA_ARTIFACT_ROOT: artifactsRoot,
 		JUNIOR_SILVA_UPLOAD_ROOT: folders.uploads,
@@ -471,7 +476,7 @@ async function appendedSessionUsage(directory, sizesBefore) {
 	return changedFiles === 1 ? totals : undefined;
 }
 
-async function runPi(prompt, sessionId, onProgress, folders, requestWorkspace) {
+async function runPi(prompt, sessionId, onProgress, chat, requestWorkspace) {
 	// Hosted Pi uses administrator-owned legal MCP registration. Its normal built-in
 	// tools remain subject to the legal-scope extension and deployment sandbox.
 	const args = [
@@ -488,11 +493,13 @@ async function runPi(prompt, sessionId, onProgress, folders, requestWorkspace) {
 	if (env("PI_MODEL")) args.push("--model", env("PI_MODEL"));
 	if (env("PI_THINKING")) args.push("--thinking", env("PI_THINKING"));
 	args.push(prompt);
-	const sessionSizesBefore = await sessionFileSizes(folders.sessions);
+	const sessionSizesBefore = await sessionFileSizes(chat.folders.sessions);
 	const startedAt = Date.now();
 	const thoughtController = createThoughtController(onProgress);
+	const timeoutMs = Number(env("JUNIOR_SILVA_PI_TIMEOUT_MS", "1200000"));
+	const runToken = createRunToken(chat, timeoutMs);
 	return new Promise((resolve, reject) => {
-		const child = spawn(process.execPath, args, { cwd: projectRoot, env: agentEnvironment(folders, requestWorkspace), stdio: ["ignore", "pipe", "pipe"] });
+		const child = spawn(process.execPath, args, { cwd: projectRoot, env: agentEnvironment(chat.folders, requestWorkspace, runToken), stdio: ["ignore", "pipe", "pipe"] });
 		// The service-level SSE keepalive is intentionally invisible. This bounded
 		// timer is different: it tells the user that Pi is still alive when a
 		// legitimate document or research step produces no lifecycle event.
@@ -542,18 +549,18 @@ async function runPi(prompt, sessionId, onProgress, folders, requestWorkspace) {
 			}
 		});
 		child.stderr.on("data", (chunk) => { stderr = `${stderr}${chunk.toString()}`.slice(-12_000); });
-		const timeout = setTimeout(() => { clearInterval(thoughtLivenessTimer); child.kill("SIGTERM"); reject(new Error("Pi request timed out")); }, Number(env("JUNIOR_SILVA_PI_TIMEOUT_MS", "1200000")));
+		const timeout = setTimeout(() => { clearInterval(thoughtLivenessTimer); child.kill("SIGTERM"); reject(new Error("Pi request timed out")); }, timeoutMs);
 		child.on("error", (error) => { clearTimeout(timeout); clearInterval(thoughtLivenessTimer); reject(error); });
 		child.on("close", (code) => {
 			clearTimeout(timeout);
 			clearInterval(thoughtLivenessTimer);
 			if (code !== 0) return reject(new Error(`Pi exited with code ${code}: ${stderr.replace(/\s+/g, " ").slice(0, 1200)}`));
 			if (!finalText.trim()) return reject(new Error("Pi returned no final answer"));
-			void appendedSessionUsage(folders.sessions, sessionSizesBefore).then((persistedUsage) => {
+			void appendedSessionUsage(chat.folders.sessions, sessionSizesBefore).then((persistedUsage) => {
 				resolve({ answer: finalText.trim(), usage: openAiUsage(persistedUsage) || openAiUsage(usageTotals), elapsedMs: Date.now() - startedAt, artifactPublished });
 			}).catch(reject);
 		});
-	});
+	}).finally(() => revokeRunToken(runToken));
 }
 
 function artifactDeliveryText(publication) {
@@ -563,7 +570,7 @@ function artifactDeliveryText(publication) {
 	return ["The requested legal work product is ready.", `## Files\n\n- [Download completed file](${url})`, markup].filter(Boolean).join("\n\n");
 }
 
-async function recoverUndeliveredArtifact({ instruction, folders, requestWorkspace, sessionId, initial, onProgress }) {
+async function recoverUndeliveredArtifact({ instruction, chat, requestWorkspace, sessionId, initial, onProgress }) {
 	if (initial.artifactPublished) return initial;
 	let candidate = await newestRequestedArtifact(requestWorkspace, instruction);
 	if (!candidate) return initial;
@@ -576,7 +583,7 @@ async function recoverUndeliveredArtifact({ instruction, folders, requestWorkspa
 		`A requested deliverable exists in this request workspace but has not been delivered. Inspect only ${candidate}. If it needs correction, correct and validate it. Then call workbench_publish_artifact for the final file and finish with a concise delivery confirmation. Do not repeat legal research or return an internal progress note.`,
 		sessionId,
 		onProgress,
-		folders,
+		chat,
 		requestWorkspace,
 	).catch(() => undefined);
 	if (repair?.artifactPublished) return repair;
@@ -633,6 +640,7 @@ async function serveArtifact(res, pathname) {
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
 // Chat folder names are built from this secret, so never start without it.
 requiredEnv("JS_IDENTITY_SECRET");
+if (env("JS_NATIVE_DEV")) throw new Error("JS_NATIVE_DEV is only for the native CLI. Remove it from the bridge's settings.");
 // One user's failed request must not end the process serving every other user.
 process.on("unhandledRejection", (reason) => console.error(`[junior-silva-v2] Unhandled rejection: ${reason?.stack || reason}`));
 await Promise.all([mkdir(artifactsRoot, { recursive: true }), mkdir(AGENT_ROOT, { recursive: true }), mkdir(auditRoot, { recursive: true })]);
@@ -659,8 +667,10 @@ const server = createServer(async (req, res) => {
 		if (req.method === "GET" && url.pathname.startsWith("/files/")) return await serveArtifact(res, url.pathname);
 		if (req.method === "POST" && url.pathname === "/internal/mcp") {
 			if (!loopback(req)) return json(res, 403, { error: "Local gateway only" });
+			const chat = chatForRunToken(bearerToken(req));
+			if (!chat) return json(res, 401, { error: "A valid run token is required" });
 			const message = await requestBody(req);
-			const response = await dispatchMcpRequest(message);
+			const response = await runInChat(chat, () => dispatchMcpRequest(message));
 			if (!response) return json(res, 202, {});
 			return json(res, 200, response);
 		}
@@ -674,18 +684,18 @@ const server = createServer(async (req, res) => {
 			const uploadText = textUploads(messages);
 			const candidates = fileCandidates(body);
 			if (!uploadText.instruction && !uploadText.files.length && !candidates.length) return json(res, 400, { error: { message: "A user message or document is required", type: "invalid_request_error" } });
-			const folders = await createChatFolders(scope);
-			const files = await saveUploads(folders.uploads, candidates, uploadText.files);
+			const chat = { ...scope, folders: await createChatFolders(scope) };
+			const files = await saveUploads(chat.folders.uploads, candidates, uploadText.files);
 			const id = `chatcmpl-${randomUUID()}`;
 			const streaming = body.stream !== false;
 			const includeStreamUsage = requestsStreamUsage(body);
-			const requestWorkspace = path.join(folders.workspace, "requests", id);
+			const requestWorkspace = path.join(chat.folders.workspace, "requests", id);
 			await mkdir(requestWorkspace, { recursive: true });
 			if (streaming) { startStream(res, id); heartbeat = setInterval(() => res.write(": keep-alive\n\n"), 15_000); }
 			const onProgress = (message) => { if (streaming) streamDelta(res, id, "reasoning_content", `${message}\n`); };
 			const result = await serial(key, async () => {
-				const initial = await runPi(piPrompt(uploadText.instruction, files, requestWorkspace), `junior-silva-v2-${key}`, onProgress, folders, requestWorkspace);
-				return recoverUndeliveredArtifact({ instruction: uploadText.instruction, folders, requestWorkspace, sessionId: `junior-silva-v2-${key}`, initial, onProgress });
+				const initial = await runPi(piPrompt(uploadText.instruction, files, requestWorkspace), `junior-silva-v2-${key}`, onProgress, chat, requestWorkspace);
+				return recoverUndeliveredArtifact({ instruction: uploadText.instruction, chat, requestWorkspace, sessionId: `junior-silva-v2-${key}`, initial, onProgress });
 			});
 			if (heartbeat) clearInterval(heartbeat);
 			if (streaming) return finishStream(res, id, result.answer, includeStreamUsage ? result.usage : undefined);

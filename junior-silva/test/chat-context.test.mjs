@@ -1,0 +1,220 @@
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { createServer } from "node:http";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { currentChat, runInChat } from "../core/chat-scope.mjs";
+import { dispatchMcpRequest } from "../mcp/server.mjs";
+import { chatForRunToken, createRunToken, revokeRunToken } from "../server/run-tokens.mjs";
+
+process.env.JUNIOR_SILVA_API_KEY ||= "test-junior-silva-key";
+const { agentEnvironment } = await import("../server/openai.mjs");
+
+const serverPath = fileURLToPath(new URL("../server/openai.mjs", import.meta.url));
+const launcherPath = fileURLToPath(new URL("../mcp/launcher.mjs", import.meta.url));
+const NO_CHAT = "This tool can only run for a chat, and none is set.";
+const CHAT_A = { userHash: "a".repeat(32), chatHash: "c".repeat(32), folders: { uploads: "/a/uploads", workspace: "/a/workspace" } };
+const CHAT_B = { userHash: "b".repeat(32), chatHash: "d".repeat(32), folders: { uploads: "/b/uploads", workspace: "/b/workspace" } };
+const MINUTE = 60_000;
+
+function withEnv(t, name, value) {
+	const before = process.env[name];
+	if (value === undefined) delete process.env[name];
+	else process.env[name] = value;
+	t.after(() => {
+		if (before === undefined) delete process.env[name];
+		else process.env[name] = before;
+	});
+}
+
+function callPublish(filePath) {
+	return dispatchMcpRequest({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "workbench_publish_artifact", arguments: { file_path: filePath } } });
+}
+
+test("a tool sees its own chat, even after waiting", async () => {
+	const seen = await runInChat(CHAT_A, async () => {
+		await delay(5);
+		return currentChat();
+	});
+	assert.equal(seen, CHAT_A);
+});
+
+test("two calls running at once each see only their own chat", async () => {
+	const look = (chat, wait) => runInChat(chat, async () => {
+		const before = currentChat();
+		await delay(wait);
+		return [before, currentChat()];
+	});
+	const [a, b] = await Promise.all([look(CHAT_A, 20), look(CHAT_B, 5)]);
+	assert.deepEqual(a, [CHAT_A, CHAT_A]);
+	assert.deepEqual(b, [CHAT_B, CHAT_B]);
+});
+
+test("the chat ends when the call ends", async (t) => {
+	withEnv(t, "JS_NATIVE_DEV", undefined);
+	await runInChat(CHAT_A, async () => currentChat());
+	assert.throws(() => currentChat(), new RegExp(NO_CHAT));
+});
+
+test("with no chat and no native setting, currentChat is an error", (t) => {
+	withEnv(t, "JS_NATIVE_DEV", undefined);
+	assert.throws(() => currentChat(), new RegExp(NO_CHAT));
+});
+
+test("a native setting of 0 or false doesn't count", (t) => {
+	for (const value of ["0", "false", ""]) {
+		withEnv(t, "JS_NATIVE_DEV", value);
+		assert.throws(() => currentChat(), new RegExp(NO_CHAT), value);
+	}
+});
+
+test("the native setting gives a marked native chat, and a real chat wins over it", async (t) => {
+	withEnv(t, "JS_NATIVE_DEV", "1");
+	assert.equal(currentChat().native, true);
+	assert.equal(await runInChat(CHAT_A, async () => currentChat()), CHAT_A);
+});
+
+test("a run token gives back its own chat until it's revoked", () => {
+	const tokenA = createRunToken(CHAT_A, MINUTE);
+	const tokenB = createRunToken(CHAT_B, MINUTE);
+	assert.match(tokenA, /^[a-f0-9]{64}$/);
+	assert.notEqual(tokenA, tokenB);
+	assert.equal(chatForRunToken(tokenA), CHAT_A);
+	assert.equal(chatForRunToken(tokenB), CHAT_B);
+	revokeRunToken(tokenA);
+	assert.equal(chatForRunToken(tokenA), undefined);
+	assert.equal(chatForRunToken(tokenB), CHAT_B);
+	revokeRunToken(tokenB);
+});
+
+test("unknown, empty and expired run tokens give no chat", () => {
+	for (const token of ["", undefined, "not-a-real-token", "a".repeat(64)]) assert.equal(chatForRunToken(token), undefined);
+	assert.equal(chatForRunToken(createRunToken(CHAT_A, 0)), undefined);
+});
+
+test("Pi gets the run token in its environment", () => {
+	const folders = { uploads: "/a/uploads", sessions: "/a/sessions" };
+	assert.equal(agentEnvironment(folders, "/a/workspace/requests/r1", "run-token-value").JS_RUN_TOKEN, "run-token-value");
+});
+
+test("a tool call with no chat is refused", async (t) => {
+	withEnv(t, "JS_NATIVE_DEV", undefined);
+	const reply = await callPublish("/etc/passwd");
+	assert.equal(reply.result.isError, true);
+	assert.equal(reply.result.content[0].text, NO_CHAT);
+});
+
+test("a tool call with a chat reaches the tool", async () => {
+	const reply = await runInChat(CHAT_A, () => callPublish("/etc/passwd"));
+	assert.equal(reply.result.isError, true);
+	assert.match(reply.result.content[0].text, /Only files created in Junior Silva's workspace can be published/);
+});
+
+test("a tool call on the native CLI reaches the tool", async (t) => {
+	withEnv(t, "JS_NATIVE_DEV", "1");
+	const reply = await callPublish("/etc/passwd");
+	assert.match(reply.result.content[0].text, /Only files created in Junior Silva's workspace can be published/);
+});
+
+test("listing tools doesn't need a chat", async (t) => {
+	withEnv(t, "JS_NATIVE_DEV", undefined);
+	const reply = await dispatchMcpRequest({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+	assert.ok(reply.result.tools.length > 0);
+});
+
+async function launcherHeaders(t, runToken) {
+	const seen = [];
+	const gateway = createServer((req, res) => {
+		seen.push(req.headers.authorization);
+		req.resume();
+		req.on("end", () => {
+			res.writeHead(200, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }));
+		});
+	});
+	await new Promise((resolve) => gateway.listen(0, "127.0.0.1", resolve));
+	t.after(() => gateway.close());
+	const environment = { ...process.env, JUNIOR_SILVA_MCP_GATEWAY_URL: `http://127.0.0.1:${gateway.address().port}/internal/mcp` };
+	delete environment.JS_RUN_TOKEN;
+	if (runToken) environment.JS_RUN_TOKEN = runToken;
+	const child = spawn(process.execPath, [launcherPath], { env: environment, stdio: ["pipe", "pipe", "ignore"] });
+	t.after(() => child.kill("SIGKILL"));
+	await new Promise((resolve, reject) => {
+		const timer = setTimeout(() => reject(new Error("The launcher didn't reply in time")), 10_000);
+		child.stdout.once("data", () => {
+			clearTimeout(timer);
+			resolve();
+		});
+		child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" })}\n`);
+	});
+	return seen;
+}
+
+test("the launcher sends the run token to the bridge", async (t) => {
+	assert.deepEqual(await launcherHeaders(t, "launcher-test-token"), ["Bearer launcher-test-token"]);
+});
+
+test("the launcher sends no header when it has no run token", async (t) => {
+	assert.deepEqual(await launcherHeaders(t, ""), [undefined]);
+});
+
+async function startServer(t, overrides = {}) {
+	const root = await mkdtemp(path.join(os.tmpdir(), "junior-silva-chat-context-"));
+	t.after(() => rm(root, { recursive: true, force: true }));
+	const port = 20000 + Math.floor(Math.random() * 20000);
+	const child = spawn(process.execPath, [serverPath], {
+		env: {
+			...process.env,
+			JUNIOR_SILVA_API_KEY: "test-junior-silva-key",
+			JS_IDENTITY_SECRET: "test-identity-secret",
+			JS_NATIVE_DEV: "",
+			JUNIOR_SILVA_BIND_HOST: "127.0.0.1",
+			JUNIOR_SILVA_PORT: String(port),
+			JUNIOR_SILVA_DATA_ROOT: root,
+			JUNIOR_SILVA_ARTIFACT_ROOT: path.join(root, "artifacts"),
+			PI_CODING_AGENT_DIR: path.join(root, "pi-agent"),
+			...overrides,
+		},
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	t.after(() => child.kill("SIGKILL"));
+	return { child, port };
+}
+
+test("the tool route refuses a call with no valid run token", async (t) => {
+	const { child, port } = await startServer(t);
+	await new Promise((resolve, reject) => {
+		const timer = setTimeout(() => reject(new Error("The server did not start in time")), 15_000);
+		child.stdout.on("data", (chunk) => {
+			if (String(chunk).includes("listening")) {
+				clearTimeout(timer);
+				resolve();
+			}
+		});
+		child.on("exit", (code) => {
+			clearTimeout(timer);
+			reject(new Error(`The server exited early with code ${code}`));
+		});
+	});
+	const post = (headers) => fetch(`http://127.0.0.1:${port}/internal/mcp`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json", ...headers },
+		body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+	});
+	assert.equal((await post({})).status, 401);
+	assert.equal((await post({ Authorization: `Bearer ${"a".repeat(64)}` })).status, 401);
+	assert.equal((await post({ Authorization: "Bearer test-junior-silva-key" })).status, 401, "the LibreChat key isn't a run token");
+});
+
+test("the bridge refuses to start with the native setting", async (t) => {
+	const { child } = await startServer(t, { JS_NATIVE_DEV: "1" });
+	let stderr = "";
+	child.stderr.on("data", (chunk) => { stderr += chunk; });
+	const code = await new Promise((resolve) => child.on("exit", resolve));
+	assert.notEqual(code, 0);
+	assert.match(stderr, /JS_NATIVE_DEV is only for the native CLI/);
+});

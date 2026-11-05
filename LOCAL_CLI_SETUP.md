@@ -172,6 +172,8 @@ chmod +x Start-JuniorSilvaV2.sh setup-junior-silva-v2.sh
 ./setup-junior-silva-v2.sh --mode native --launch
 ```
 
+Legal tools refuse to run without a chat. The native start scripts and the `junior-silva-cli` Docker service set `JS_NATIVE_DEV=1`, which lets them run for one developer on their own machine. If you start Pi another way, set it yourself. Don't put it in `.env`, because the bridge refuses to start with it.
+
 For a fully capable Ubuntu/Debian native runtime, let the script install host document/review dependencies. This uses `sudo` and installs LibreOffice, Pandoc, Python packages, Tesseract, Poppler and Chromium support:
 
 ```bash

@@ -58,6 +58,7 @@ services:
       DRAFTER_BASE_URL: ${JUNIOR_SILVA_DOCKER_DRAFTER_BASE_URL:-http://drafter-weeramantry:8033}
       TRANSLATOR_BASE_URL: ${TRANSLATOR_BASE_URL:-https://www.devtranslate.paralegal.lk/api}
       JUNIOR_SILVA_KB_ROOT: /kb
+      JS_NATIVE_DEV: "1"
     command: ["node", "junior-silva/cli/docker-cli.mjs"]
     stdin_open: true
     tty: true
