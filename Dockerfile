@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 # bayoo-docx adds Word comments to the standard python-docx API. The native
 # review renderer uses it to keep comments and highlights at source clauses.
-RUN python3 -m pip install --break-system-packages --no-cache-dir "bayoo-docx>=0.2.14"
+RUN python3 -m pip install --break-system-packages --no-cache-dir "pdf2docx==0.5.8" "bayoo-docx>=0.2.14"
 
 COPY package.json package-lock.json ./
 COPY packages ./packages

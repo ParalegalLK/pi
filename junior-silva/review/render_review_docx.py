@@ -5,11 +5,14 @@ import argparse
 import json
 import os
 import re
+import tempfile
 from copy import deepcopy
 from pathlib import Path
 
 import docx
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
+from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.enum.section import WD_SECTION
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
@@ -175,7 +178,25 @@ def borders(table):
 
 
 def add_cover(document, title, perspective, findings, categories=None):
-    anchor = document.paragraphs[0] if document.paragraphs else document.add_paragraph()
+    # Insert before the first body element, which might itself be a table.
+    cover_section = deepcopy(document.sections[0]._sectPr)
+    for tag in ("w:headerReference", "w:footerReference"):
+        for element in cover_section.findall(qn(tag)):
+            cover_section.remove(element)
+    margins = cover_section.find(qn("w:pgMar"))
+    if margins is None:
+        margins = OxmlElement("w:pgMar")
+        cover_section.append(margins)
+    for side in ("top", "bottom", "left", "right"):
+        margins.set(qn(f"w:{side}"), "1440")  # One inch, in twips.
+    section_type = cover_section.find(qn("w:type"))
+    if section_type is None:
+        section_type = OxmlElement("w:type")
+        cover_section.insert(0, section_type)
+    section_type.set(qn("w:val"), "nextPage")
+    marker = document.add_paragraph()
+    document._body._body.insert(0, marker._p)
+    anchor = marker
     title_p = anchor.insert_paragraph_before(title)
     title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     title_p.runs[0].bold = True
@@ -185,6 +206,16 @@ def add_cover(document, title, perspective, findings, categories=None):
     anchor.insert_paragraph_before(f"Validated findings: {len(findings)}")
     anchor.insert_paragraph_before("Legal and commercial findings are highlighted in the source text and explained in Word comments.")
     table = document.add_table(rows=1, cols=4)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
+    section = document.sections[0]
+    usable_width = max(section.page_width - Inches(2), Inches(3))
+    widths = [int(usable_width * fraction) for fraction in (0.08, 0.27, 0.15, 0.50)]
+    for column, width in zip(table.columns, widths):
+        column.width = width
+    table_width = table._tbl.tblPr.find(qn("w:tblW"))
+    table_width.set(qn("w:type"), "dxa")
+    table_width.set(qn("w:w"), str(round(usable_width / 635)))
     borders(table)
     for cell, label in zip(table.rows[0].cells, ["No.", "Classification", "Clause", "Finding"]):
         cell.text = label
@@ -200,12 +231,20 @@ def add_cover(document, title, perspective, findings, categories=None):
         cells[1].text = labels.get(str(finding.get("classification", "")).lower(), str(finding.get("classification", "Review finding")))
         cells[2].text = str(finding.get("clause_number", "N/A"))
         cells[3].text = str(finding.get("title", "Contractual risk"))
+    # Word uses cell widths as well as the grid; setting only grid widths leaves
+    # the original full-width cells and can push the table off the cover page.
+    for row in table.rows:
+        for cell, width in zip(row.cells, widths):
+            cell.width = width
     anchor._p.addprevious(table._tbl)
+    anchor.insert_paragraph_before("")
     legend = categories or [{"color": "Red", "name": "Illegal / Non-compliant under Sri Lankan law"}, {"color": "Orange", "name": "Material commercial risk for the selected party"}, {"color": "Yellow", "name": "Negotiation point (lawful but worth improving)"}]
+    circles = {"red": "🔴", "orange": "🟠", "yellow": "🟡"}
     for category in legend:
-        anchor.insert_paragraph_before(f"{category['color'].capitalize()} Highlight = {category['name']}")
-    page = anchor.insert_paragraph_before("")
-    page.add_run().add_break(WD_BREAK.PAGE)
+        anchor.insert_paragraph_before(f"{circles.get(category['color'].lower(), '●')} {category['color'].capitalize()} Highlight = {category['name']}")
+    section_break = anchor.insert_paragraph_before("")
+    section_break._p.get_or_add_pPr().append(cover_section)
+    anchor._p.getparent().remove(anchor._p)
 
 
 def add_extracted_source(document, source_text):
@@ -224,7 +263,11 @@ def add_extracted_source(document, source_text):
 
 
 def add_findings_body(document, findings):
-    document.add_page_break()
+    # The converted source can have zero margins. Start a new report section
+    # rather than changing those margins on the source pages.
+    section = document.add_section(WD_SECTION.NEW_PAGE)
+    section.top_margin = section.bottom_margin = Inches(1)
+    section.left_margin = section.right_margin = Inches(1)
     document.add_heading("Clause-by-clause review findings", level=1)
     for index, finding in enumerate(findings, 1):
         document.add_heading(f"{index}. {finding.get('title', 'Contractual risk')} — Clause {finding.get('clause_number', 'N/A')}", level=2)
@@ -253,11 +296,31 @@ def main():
     source = Path(args.source) if args.source else None
     source_text = Path(args.source_text).read_text(encoding="utf-8") if args.source_text else ""
     annotation_ledger = []
+    conversion_warning = None
     if source and source.suffix.lower() == ".docx" and source.is_file():
         document = docx.Document(str(source))
+    elif source and source.suffix.lower() == ".pdf" and source.is_file():
+        try:
+            from pdf2docx import Converter
+            with tempfile.TemporaryDirectory(prefix="junior-review-pdf-") as directory:
+                converted = str(Path(directory) / "source.docx")
+                converter = Converter(str(source))
+                try:
+                    converter.convert(converted)
+                finally:
+                    converter.close()
+                document = docx.Document(converted)
+            if not any(p.text.strip() for p in document_paragraphs(document)):
+                raise ValueError("PDF conversion returned no editable text")
+            conversion_warning = "PDF layout is reconstructed; verify formatting and reading order against the original."
+        except Exception:
+            document = docx.Document()
+            add_extracted_source(document, source_text)
+            conversion_warning = "PDF layout could not be reconstructed; the review uses extracted text and does not preserve the original formatting."
     else:
         document = docx.Document()
         add_extracted_source(document, source_text)
+        conversion_warning = "Only extracted source text was available; original formatting could not be preserved."
     for finding in findings:
         annotated = False
         for paragraph in document_paragraphs(document):
@@ -273,10 +336,6 @@ def main():
     if not (source and source.suffix.lower() == ".docx" and source.is_file()):
         add_findings_body(document, findings)
     add_cover(document, args.title, args.perspective, findings, categories)
-    for section in document.sections:
-        footer = section.footer.paragraphs[0]
-        footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        footer.text = "Legal review prepared by Junior Silva | paralegal.lk"
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     document.save(output)
@@ -285,6 +344,7 @@ def main():
         "total_findings": len(findings),
         "annotated_count": sum(1 for item in annotation_ledger if item["status"] == "annotated"),
         "annotation_ledger": annotation_ledger,
+        "formatting_notice": conversion_warning,
     }))
 
 
