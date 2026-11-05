@@ -3,14 +3,14 @@ import test from "node:test";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { newestRequestedArtifact, requestedArtifactExtensions, requestedSlideCount } from "../core/artifact-delivery.mjs";
-import { artifactsRoot, workspaceRoot } from "../core/environment.mjs";
+import { createChatFolders, runInChat } from "../core/chat-scope.mjs";
 import { publishWorkspaceArtifact } from "../core/files.mjs";
 import PptxGenJS from "pptxgenjs";
 
-// This file calls publishing directly on temporary files, like the native CLI does.
-process.env.JS_NATIVE_DEV = "1";
+process.env.JUNIOR_SILVA_PUBLIC_URL ||= "https://example.test";
+process.env.JUNIOR_SILVA_ARTIFACT_SECRET ||= "test-artifact-secret";
 
 test("detects requested user-facing artifact types without treating source files as deliverables", () => {
 	assert.deepEqual([...requestedArtifactExtensions("Make a four-slide PowerPoint and include the Markdown source")].sort(), [".md", ".pptx"]);
@@ -30,7 +30,10 @@ test("only discovers the newest requested deliverable inside the active request 
 });
 
 test("a validated request-local presentation publishes a protected download and trusted preview", async (t) => {
-	const requestWorkspace = path.join(workspaceRoot, "test-delivery", randomUUID());
+	const scope = { userHash: randomBytes(16).toString("hex"), chatHash: randomBytes(16).toString("hex") };
+	const folders = await createChatFolders(scope);
+	t.after(() => rm(path.resolve(folders.root, "..", ".."), { recursive: true, force: true }));
+	const requestWorkspace = path.join(folders.workspace, "requests", randomUUID());
 	await mkdir(requestWorkspace, { recursive: true });
 	const filename = path.join(requestWorkspace, "legal-due-diligence.pptx");
 	const deck = new PptxGenJS();
@@ -39,11 +42,7 @@ test("a validated request-local presentation publishes a protected download and 
 		slide.addText(title, { x: 0.6, y: 0.5, w: 9, h: 0.5 });
 	}
 	await deck.writeFile({ fileName: filename });
-	const publication = await publishWorkspaceArtifact(filename);
-	t.after(() => Promise.all([
-		rm(requestWorkspace, { recursive: true, force: true }),
-		rm(path.join(artifactsRoot, publication.operation_id), { recursive: true, force: true }),
-	]));
+	const publication = await runInChat({ ...scope, folders }, () => publishWorkspaceArtifact(filename));
 	assert.match(publication.artifact.download_url, /^https?:\/\//);
 	assert.match(publication.artifact_markup, /slide-gallery/);
 });

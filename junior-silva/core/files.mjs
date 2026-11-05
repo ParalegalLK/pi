@@ -2,8 +2,8 @@ import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { readChatFile } from "./chat-scope.mjs";
-import { artifactsRoot, env } from "./environment.mjs";
+import { chatFolders, currentChat, readChatFile } from "./chat-scope.mjs";
+import { artifactsRoot, env, requiredEnv } from "./environment.mjs";
 import { download } from "./http.mjs";
 import { preparePreview } from "./previews.mjs";
 
@@ -24,12 +24,25 @@ const MIME = new Map([
 	[".jpeg", "image/jpeg"],
 ]);
 
-function artifactSecret() {
-	return env("JUNIOR_SILVA_ARTIFACT_SECRET", env("JUNIOR_SILVA_API_KEY", "junior-silva-local-artifacts"));
+const DEFAULT_LINK_HOURS = 168;
+const CHAT_HASH = /^[a-f0-9]{32}$/;
+
+// Covers every part of a download link, so changing any of them breaks the link.
+function linkSignature({ userHash, chatHash, operationId, filename, expiresAt }) {
+	const message = ["download", userHash, chatHash, operationId, filename, expiresAt].join("\0");
+	return createHmac("sha256", requiredEnv("JUNIOR_SILVA_ARTIFACT_SECRET")).update(message).digest("hex");
 }
 
-function capability(operationId, filename) {
-	return createHmac("sha256", artifactSecret()).update(`${operationId}\0${filename}`).digest("hex");
+function linkExpiry() {
+	const hours = Number(env("JS_LINK_TTL_HOURS", String(DEFAULT_LINK_HOURS)));
+	const lifetime = Number.isFinite(hours) && hours > 0 ? hours : DEFAULT_LINK_HOURS;
+	return Math.floor(Date.now() / 1000 + lifetime * 3600);
+}
+
+function downloadUrl(publicBase, { userHash, chatHash }, operationId, filename) {
+	const expiresAt = linkExpiry();
+	const signature = linkSignature({ userHash, chatHash, operationId, filename, expiresAt });
+	return `${publicBase}/files/${signature}/${userHash}/${chatHash}/${encodeURIComponent(operationId)}/${encodeURIComponent(filename)}?exp=${expiresAt}`;
 }
 
 function equalText(left, right) {
@@ -45,7 +58,7 @@ export async function inputFile(filename) {
 }
 export async function operationDirectory(prefix) {
 	const id = `${prefix}-${randomUUID()}`;
-	const directory = path.join(artifactsRoot, id);
+	const directory = path.join(currentChat().folders.artifacts, id);
 	await mkdir(directory, { recursive: true });
 	return { id, directory };
 }
@@ -115,8 +128,9 @@ export function mimeType(filename) {
 }
 
 export function describeArtifact(filename, operationId) {
+	const chat = currentChat();
 	const absolute = path.resolve(filename);
-	const root = path.resolve(artifactsRoot, operationId);
+	const root = path.resolve(chat.folders.artifacts, operationId);
 	if (absolute !== root && !absolute.startsWith(`${root}${path.sep}`)) throw new Error("Artifact is outside its operation directory");
 	const name = path.basename(absolute);
 	const publicBase = env("JUNIOR_SILVA_PUBLIC_URL").replace(/\/$/, "");
@@ -125,17 +139,20 @@ export function describeArtifact(filename, operationId) {
 		media_type: mimeType(name),
 		local_path: absolute,
 		file_uri: pathToFileURL(absolute).href,
-		...(publicBase ? { download_url: `${publicBase}/files/${capability(operationId, name)}/${encodeURIComponent(operationId)}/${encodeURIComponent(name)}` } : {}),
+		// The native CLI has no chat for the bridge to find the file in, so it only gets the local path.
+		...(publicBase && !chat.native ? { download_url: downloadUrl(publicBase, chat, operationId, name) } : {}),
 	};
 }
 
-export function resolveArtifactRequest(token, operationId, filename) {
-	if (!/^[-A-Za-z0-9]+$/.test(operationId) || path.basename(filename) !== filename) return undefined;
-	if (!equalText(token, capability(operationId, filename))) return undefined;
-	const root = path.resolve(artifactsRoot, operationId);
+// Returns { target } for a good link, { expired: true } for an expired one, and {} for anything
+// else. Expiry is only checked after the signature, so nobody can use it to test made-up links.
+export function resolveArtifactRequest({ signature, userHash, chatHash, operationId, filename, expiresAt }) {
+	if (!CHAT_HASH.test(userHash) || !CHAT_HASH.test(chatHash) || !/^[-A-Za-z0-9]+$/.test(operationId) || path.basename(filename) !== filename || !/^\d+$/.test(String(expiresAt))) return {};
+	if (!equalText(signature, linkSignature({ userHash, chatHash, operationId, filename, expiresAt }))) return {};
+	if (Number(expiresAt) * 1000 <= Date.now()) return { expired: true };
+	const root = path.resolve(chatFolders({ userHash, chatHash }).artifacts, operationId);
 	const target = path.resolve(root, filename);
-	if (!target.startsWith(`${root}${path.sep}`)) return undefined;
-	return target;
+	return target.startsWith(`${root}${path.sep}`) ? { target } : {};
 }
 
 export { artifactsRoot, safeFilename };

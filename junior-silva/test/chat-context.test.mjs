@@ -171,6 +171,7 @@ async function startServer(t, overrides = {}) {
 			...process.env,
 			JUNIOR_SILVA_API_KEY: "test-junior-silva-key",
 			JS_IDENTITY_SECRET: "test-identity-secret",
+			JUNIOR_SILVA_ARTIFACT_SECRET: "test-artifact-secret",
 			JS_NATIVE_DEV: "",
 			JUNIOR_SILVA_BIND_HOST: "127.0.0.1",
 			JUNIOR_SILVA_PORT: String(port),

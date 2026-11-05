@@ -110,7 +110,7 @@ test("native review finalises every review target while retaining annexures as s
 	assert.equal(result.reviews.length, 2);
 	assert.ok(result.reviews.every((review) => review.annotation_coverage.annotated_count === 1));
 	assert.ok(result.reviews.every((review) => review.reviewed_docx.name.startsWith("Reviewed_")));
-	assert.ok(result.reviews.every((review) => review.reviewed_docx.download_url));
+	assert.ok(result.reviews.every((review) => review.reviewed_docx.local_path && !review.reviewed_docx.download_url), "the native CLI gets a local path, not a download link");
 	assert.ok(result.artifact_markups.length === 2);
 });
 

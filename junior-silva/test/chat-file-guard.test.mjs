@@ -12,6 +12,7 @@ const artifactsRoot = path.join(dataRoot, "artifacts");
 process.env.JUNIOR_SILVA_DATA_ROOT = dataRoot;
 process.env.JUNIOR_SILVA_ARTIFACT_ROOT = artifactsRoot;
 process.env.JUNIOR_SILVA_PUBLIC_URL = "https://example.test";
+process.env.JUNIOR_SILVA_ARTIFACT_SECRET = "test-artifact-secret";
 delete process.env.JS_NATIVE_DEV;
 
 const { createChatFolders, readChatFile, readChatText, runInChat, updateChatFile } = await import("../core/chat-scope.mjs");
@@ -28,9 +29,14 @@ const chatA = { ...scopeA, folders: await createChatFolders(scopeA) };
 const chatB = { ...scopeB, folders: await createChatFolders(scopeB) };
 const secretFile = path.join(chatA.folders.uploads, "contract.md");
 const secretJson = path.join(chatA.folders.uploads, "secret.json");
-await mkdir(artifactsRoot, { recursive: true });
+const secretReviewFolder = path.join(chatA.folders.artifacts, "review-preparation-1");
+const secretContext = path.join(secretReviewFolder, "review-context.json");
+const secretReviewText = path.join(secretReviewFolder, "review-target-1-source.md");
+await mkdir(secretReviewFolder, { recursive: true });
 await writeFile(secretFile, SECRET);
 await writeFile(secretJson, JSON.stringify({ secret: SECRET }));
+await writeFile(secretReviewText, SECRET);
+await writeFile(secretContext, JSON.stringify({ checkpoint: { required: false }, targets: [{ id: "a", filename: "a.md", file: secretFile, source_text_file: secretReviewText, clauses: [] }], secret: SECRET }));
 
 const asB = (task) => runInChat(chatB, task);
 const inWorkspace = (name) => path.join(chatB.folders.workspace, name);
@@ -57,7 +63,7 @@ async function toolOutput(name, args) {
 test("a chat reads its own uploads, workspace and artifacts", async () => {
 	const upload = path.join(chatB.folders.uploads, "mine.md");
 	const work = inWorkspace("mine.md");
-	const artifact = path.join(artifactsRoot, "mine.md");
+	const artifact = path.join(chatB.folders.artifacts, "mine.md");
 	await Promise.all([writeFile(upload, "upload"), writeFile(work, "work"), writeFile(artifact, "artifact")]);
 	await asB(async () => {
 		assert.equal(await readChatText(upload), "upload");
@@ -187,7 +193,7 @@ test("a refusal is logged with the chat and reason, but never the path", async (
 
 test("an update rewrites this chat's file through the guard", async (t) => {
 	quiet(t);
-	const artifact = path.join(artifactsRoot, "context.json");
+	const artifact = path.join(chatB.folders.artifacts, "context.json");
 	await writeFile(artifact, JSON.stringify({ text: "a long original value that is much longer than the update" }));
 	await asB(() => updateChatFile(artifact, () => "{}", { only: ["artifacts"] }));
 	assert.equal(await readFile(artifact, "utf8"), "{}");
@@ -220,13 +226,37 @@ test("no tool gives User B a file from User A's chat", async (t) => {
 	assert.equal(await readFile(secretJson, "utf8"), before);
 });
 
+test("User B can't reach User A's artifacts or review files", async (t) => {
+	quiet(t);
+	const before = await readFile(secretContext, "utf8");
+	await refusedByGuard(() => readChatFile(secretContext));
+	await refusedByGuard(() => readChatFile(secretReviewText));
+	await asB(() => assert.rejects(updateChatFile(secretContext, () => "changed", { only: ["artifacts"] }), { message: NOT_FOUND }));
+	const findings = [{ clause_number: "1", anchor_text: "the agreement reference number is 4711", category: "commercial", title: "Test" }];
+	await assertToolRefused("review_finalize_document", { findings, review_context_file: secretContext });
+	await assertToolRefused("review_record_checkpoint_outcome", { review_context_file: secretContext, outcome: "skip" });
+	await assertToolRefused("legal_validate_draft", { file_path: secretReviewText });
+	await assertToolRefused("librechat_prepare_document_preview", { file_path: secretReviewText });
+	await assertToolRefused("workbench_publish_artifact", { file_path: secretReviewText });
+	assert.equal(await readFile(secretContext, "utf8"), before);
+	await runInChat(chatA, async () => assert.equal(await readChatText(secretReviewText), SECRET));
+});
+
+test("the old shared artifacts folder is no longer readable", async (t) => {
+	quiet(t);
+	await mkdir(artifactsRoot, { recursive: true });
+	const oldFile = path.join(artifactsRoot, "old-file.md");
+	await writeFile(oldFile, "old shared file");
+	await refusedByGuard(() => readChatFile(oldFile));
+});
+
 test("a forged review context can't reach another chat's files", async (t) => {
 	quiet(t);
 	const findings = [{ clause_number: "1", anchor_text: "The Supplier assigns all existing tools to the Client.", category: "commercial", title: "Tools" }];
 	const ownText = inWorkspace("forged-source.txt");
 	await writeFile(ownText, "1 The Supplier assigns all existing tools to the Client.\n");
 	const forge = async (name, target) => {
-		const file = path.join(artifactsRoot, name);
+		const file = path.join(chatB.folders.artifacts, name);
 		await writeFile(file, JSON.stringify({ checkpoint: { required: false }, targets: [{ id: "../../escape", filename: "forged.txt", clauses: [], ...target }] }));
 		return file;
 	};
@@ -247,10 +277,12 @@ test("tools still work on this chat's own files", async () => {
 
 	const preview = await toolOutput("librechat_prepare_document_preview", { file_path: draft });
 	assert.match(preview.artifact_markup, /^:::artifact/);
-	assert.deepEqual(await readdir(path.join(artifactsRoot, preview.operation_id)), ["preview-manifest.json"], "the preview copy must be removed");
+	assert.deepEqual(await readdir(path.join(chatB.folders.artifacts, preview.operation_id)), ["preview-manifest.json"], "the preview copy must be removed");
 
 	const published = await toolOutput("workbench_publish_artifact", { file_path: draft });
-	assert.match(published.artifact.download_url, /^https:\/\/example\.test\/files\//);
+	assert.ok(published.artifact.download_url.startsWith(`https://example.test/files/`));
+	assert.ok(published.artifact.download_url.includes(`/${scopeB.userHash}/${scopeB.chatHash}/`), "the link names this chat");
+	assert.ok(published.artifact.local_path.startsWith(`${chatB.folders.artifacts}${path.sep}`), "the file is in this chat's artifacts");
 	assert.equal(await readFile(published.artifact.local_path, "utf8"), await readFile(draft, "utf8"));
 });
 
@@ -274,7 +306,9 @@ test("a full review works on this chat's own upload, and leaves no copies behind
 	});
 	assert.equal(result.completion, "review-artifacts-ready");
 	assert.ok((await readFile(result.reviewed_docx.local_path)).subarray(0, 2).equals(Buffer.from("PK")));
-	const left = await readdir(path.join(artifactsRoot, result.operation_id));
+	assert.ok(result.reviewed_docx.download_url.includes(`/${scopeB.userHash}/${scopeB.chatHash}/`));
+	assert.ok(prepared.review_context_file.startsWith(`${chatB.folders.artifacts}${path.sep}`), "review files stay in this chat's artifacts");
+	const left = await readdir(path.join(chatB.folders.artifacts, result.operation_id));
 	assert.deepEqual(left.filter((name) => name.startsWith("source-")), [], "the renderer's copies must be removed");
 });
 

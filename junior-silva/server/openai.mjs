@@ -2,8 +2,8 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { existsSync } from "node:fs";
-import { appendFile, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { constants, existsSync } from "node:fs";
+import { appendFile, mkdir, open, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { createChatFolders, resolveChatScope, runInChat } from "../core/chat-scope.mjs";
@@ -415,7 +415,7 @@ function agentEnvironment(folders, requestWorkspace, runToken) {
 		JUNIOR_SILVA_MCP_GATEWAY_URL: `http://127.0.0.1:${PORT}/internal/mcp`,
 		JS_RUN_TOKEN: runToken,
 		JUNIOR_SILVA_DATA_ROOT: path.dirname(artifactsRoot),
-		JUNIOR_SILVA_ARTIFACT_ROOT: artifactsRoot,
+		JUNIOR_SILVA_ARTIFACT_ROOT: folders.artifacts,
 		JUNIOR_SILVA_UPLOAD_ROOT: folders.uploads,
 		JUNIOR_SILVA_WORKSPACE_ROOT: requestWorkspace,
 	};
@@ -625,25 +625,39 @@ function finishStream(res, id, answer, usage) {
 	res.end("data: [DONE]\n\n");
 }
 
-async function serveArtifact(res, pathname) {
+// This route is public, so a planted shortcut or FIFO must not be served through it.
+async function readPublishedFile(target) {
+	const handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK).catch(() => undefined);
+	if (!handle) return undefined;
+	try {
+		return (await handle.stat()).isFile() ? await handle.readFile() : undefined;
+	} finally {
+		await handle.close();
+	}
+}
+
+async function serveArtifact(res, pathname, expiresAt) {
 	let parts;
 	try { parts = pathname.split("/").filter(Boolean).map((part) => decodeURIComponent(part)); }
 	catch { return json(res, 404, { error: "Not found" }); }
-	if (parts.length !== 4 || parts[0] !== "files") return json(res, 404, { error: "Not found" });
-	const target = resolveArtifactRequest(parts[1], parts[2], parts[3]);
-	if (!target || !existsSync(target)) return json(res, 404, { error: "Not found" });
-	const bytes = await readFile(target);
+	if (parts.length !== 6 || parts[0] !== "files") return json(res, 404, { error: "Not found" });
+	const [, signature, userHash, chatHash, operationId, filename] = parts;
+	const { target, expired } = resolveArtifactRequest({ signature, userHash, chatHash, operationId, filename, expiresAt });
+	if (expired) return json(res, 410, { error: "This download link has expired. Ask for the file again." });
+	const bytes = target && await readPublishedFile(target);
+	if (!bytes) return json(res, 404, { error: "Not found" });
 	res.writeHead(200, { "Content-Type": mimeType(target), "Content-Length": bytes.length, "Content-Disposition": `attachment; filename="${safeFilename(path.basename(target))}"`, "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" });
 	res.end(bytes);
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
-// Chat folder names are built from this secret, so never start without it.
+// Chat folder names and download links are built from these secrets, so never start without them.
 requiredEnv("JS_IDENTITY_SECRET");
+requiredEnv("JUNIOR_SILVA_ARTIFACT_SECRET");
 if (env("JS_NATIVE_DEV")) throw new Error("JS_NATIVE_DEV is only for the native CLI. Remove it from the bridge's settings.");
 // One user's failed request must not end the process serving every other user.
 process.on("unhandledRejection", (reason) => console.error(`[junior-silva-v2] Unhandled rejection: ${reason?.stack || reason}`));
-await Promise.all([mkdir(artifactsRoot, { recursive: true }), mkdir(AGENT_ROOT, { recursive: true }), mkdir(auditRoot, { recursive: true })]);
+await Promise.all([mkdir(AGENT_ROOT, { recursive: true }), mkdir(auditRoot, { recursive: true })]);
 // Hosted mode uses an administrator-owned global MCP registration. It does not
 // bypass Pi's project-trust prompt or approve arbitrary project-local code.
 await writeFile(path.join(AGENT_ROOT, "mcp.json"), `${JSON.stringify({
@@ -664,7 +678,7 @@ const server = createServer(async (req, res) => {
 		const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
 		if (req.method === "GET" && url.pathname === "/health") return json(res, 200, { status: "ok", service: MODEL, pi: "1.0.0" });
 		if (req.method === "GET" && url.pathname === "/ready") return json(res, 200, { ready: existsSync(PI_CLI), mcp: existsSync(path.join(projectRoot, ".pi", "mcp.json")) });
-		if (req.method === "GET" && url.pathname.startsWith("/files/")) return await serveArtifact(res, url.pathname);
+		if (req.method === "GET" && url.pathname.startsWith("/files/")) return await serveArtifact(res, url.pathname, url.searchParams.get("exp"));
 		if (req.method === "POST" && url.pathname === "/internal/mcp") {
 			if (!loopback(req)) return json(res, 403, { error: "Local gateway only" });
 			const chat = chatForRunToken(bearerToken(req));

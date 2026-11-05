@@ -10,6 +10,7 @@ process.env.JUNIOR_SILVA_ARTIFACT_ROOT = path.join(dataRoot, "artifacts");
 process.env.JUNIOR_SILVA_UPLOAD_ROOT = path.join(dataRoot, "uploads");
 process.env.JUNIOR_SILVA_WORKSPACE_ROOT = path.join(dataRoot, "workspace");
 process.env.JUNIOR_SILVA_PUBLIC_URL = "https://example.test";
+process.env.JUNIOR_SILVA_ARTIFACT_SECRET = "test-artifact-secret";
 process.env.JUNIOR_SILVA_API_KEY ||= "test-junior-silva-key";
 
 const { chatFolders, createChatFolders, runInChat } = await import("../core/chat-scope.mjs");
@@ -29,6 +30,7 @@ test("a chat's folders all sit under its user and chat hashes", () => {
 	assert.deepEqual(chatFolders(scope), {
 		root,
 		uploads: path.join(root, "uploads"),
+		artifacts: path.join(root, "artifacts"),
 		workspace: path.join(root, "workspace"),
 		sessions: path.join(root, "sessions"),
 	});
@@ -45,7 +47,7 @@ test("different users and different chats get different folders", () => {
 
 test("creating a chat's folders makes them private and keeps what's already there", async () => {
 	const folders = await createChatFolders({ userHash: USER, chatHash: "e".repeat(32) });
-	for (const directory of [folders.root, folders.uploads, folders.workspace, folders.sessions, path.join(dataRoot, "users", USER)]) {
+	for (const directory of [folders.root, folders.uploads, folders.artifacts, folders.workspace, folders.sessions, path.join(dataRoot, "users", USER)]) {
 		assert.equal((await stat(directory)).mode & 0o777, 0o700, directory);
 	}
 	const kept = path.join(folders.sessions, "session.jsonl");
@@ -54,12 +56,13 @@ test("creating a chat's folders makes them private and keeps what's already ther
 	assert.equal(await readFile(kept, "utf8"), "history");
 });
 
-test("Pi's session and upload settings point at this chat", () => {
+test("Pi's session, upload and artifact settings point at this chat", () => {
 	const folders = chatFolders(scope);
 	const requestWorkspace = path.join(folders.workspace, "requests", "r1");
 	const output = agentEnvironment(folders, requestWorkspace);
 	assert.equal(output.PI_CODING_AGENT_SESSION_DIR, folders.sessions);
 	assert.equal(output.JUNIOR_SILVA_UPLOAD_ROOT, folders.uploads);
+	assert.equal(output.JUNIOR_SILVA_ARTIFACT_ROOT, folders.artifacts);
 	assert.equal(output.JUNIOR_SILVA_WORKSPACE_ROOT, requestWorkspace);
 });
 
@@ -74,6 +77,7 @@ test("a file in a chat's workspace publishes, and a file in its other folders do
 	await runInChat({ ...chatScope, folders }, async () => {
 		const publication = await publishWorkspaceArtifact(draft);
 		assert.match(publication.artifact.download_url, /^https:\/\/example\.test\/files\//);
+		assert.ok(publication.artifact.local_path.startsWith(`${folders.artifacts}${path.sep}`), "published files stay in this chat's artifacts");
 
 		for (const directory of [folders.uploads, folders.sessions]) {
 			const file = path.join(directory, "note.md");

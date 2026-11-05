@@ -38,12 +38,12 @@ export function resolveChatScope(headers, body) {
 // that chat and nothing else.
 export function chatFolders({ userHash, chatHash }) {
 	const root = path.join(USERS_ROOT, userHash, "chats", chatHash);
-	return { root, uploads: path.join(root, "uploads"), workspace: path.join(root, "workspace"), sessions: path.join(root, "sessions") };
+	return { root, uploads: path.join(root, "uploads"), artifacts: path.join(root, "artifacts"), workspace: path.join(root, "workspace"), sessions: path.join(root, "sessions") };
 }
 
 export async function createChatFolders(scope) {
 	const folders = chatFolders(scope);
-	await Promise.all([folders.uploads, folders.workspace, folders.sessions].map((directory) => mkdir(directory, { recursive: true, mode: 0o700 })));
+	await Promise.all([folders.uploads, folders.artifacts, folders.workspace, folders.sessions].map((directory) => mkdir(directory, { recursive: true, mode: 0o700 })));
 	return folders;
 }
 
@@ -58,7 +58,7 @@ export function runInChat(chat, task) {
 export function currentChat() {
 	const chat = activeChat.getStore();
 	if (chat) return chat;
-	if (booleanEnv("JS_NATIVE_DEV")) return { native: true, folders: { uploads: uploadsRoot, workspace: workspaceRoot } };
+	if (booleanEnv("JS_NATIVE_DEV")) return { native: true, folders: { uploads: uploadsRoot, artifacts: artifactsRoot, workspace: workspaceRoot } };
 	throw new Error("This tool can only run for a chat, and none is set.");
 }
 
@@ -66,10 +66,9 @@ function inside(file, roots) {
 	return roots.some((root) => file.startsWith(`${root}${path.sep}`));
 }
 
-// Never sessions. Artifacts stay shared between chats until they move per chat.
+// This chat's folders only, and never its sessions.
 async function allowedRoots(chat, only = ["uploads", "workspace", "artifacts"]) {
-	const folders = { uploads: chat.folders.uploads, workspace: chat.folders.workspace, artifacts: chat.folders.artifacts ?? artifactsRoot };
-	const roots = await Promise.all(only.map((name) => realpath(folders[name]).catch(() => undefined)));
+	const roots = await Promise.all(only.map((name) => realpath(chat.folders[name]).catch(() => undefined)));
 	return roots.filter(Boolean);
 }
 

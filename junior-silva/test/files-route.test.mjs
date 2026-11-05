@@ -7,6 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 process.env.JUNIOR_SILVA_API_KEY ||= "test-junior-silva-key";
+process.env.JUNIOR_SILVA_ARTIFACT_SECRET ||= "test-artifact-secret";
 
 const { serveArtifact } = await import("../server/openai.mjs");
 
@@ -29,7 +30,7 @@ test("a malformed percent-encoded artifact path returns 404 instead of throwing"
 
 test("an artifact path with a bad signature returns 404", async () => {
 	const res = fakeResponse();
-	await serveArtifact(res, "/files/not-a-signature/operation/name.docx");
+	await serveArtifact(res, `/files/not-a-signature/${"a".repeat(32)}/${"c".repeat(32)}/operation/name.docx`, "9999999999");
 	assert.equal(res.status, 404);
 });
 
@@ -42,6 +43,7 @@ test("a malformed artifact path does not stop the running server", async (t) => 
 			...process.env,
 			JUNIOR_SILVA_API_KEY: "test-junior-silva-key",
 			JS_IDENTITY_SECRET: "test-identity-secret",
+			JUNIOR_SILVA_ARTIFACT_SECRET: "test-artifact-secret",
 			JUNIOR_SILVA_BIND_HOST: "127.0.0.1",
 			JUNIOR_SILVA_PORT: String(port),
 			JUNIOR_SILVA_DATA_ROOT: root,
