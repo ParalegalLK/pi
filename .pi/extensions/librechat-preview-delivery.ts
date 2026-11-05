@@ -48,7 +48,7 @@ function removeUntrustedHtmlPreview(text: string) {
 	// Only renderer-produced :::artifact markup is allowed to create the browser
 	// preview. It also removes model-copied internal artifact metadata.
 	return text.replace(/<!doctype\s+html[\s\S]*?<\/html>/gi, "").split("\n")
-		.filter((line) => !/(?:local_path|file_uri|\/data\/(?:artifacts|uploads|workspace)|\/app\/)/i.test(line))
+		.filter((line) => !/(?:local_path|file_uri|\/data\/(?:artifacts|uploads|workspace|users)|\/app\/)/i.test(line))
 		.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
