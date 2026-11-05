@@ -1,11 +1,12 @@
 #!/usr/bin/env node
-import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
 import { appendFile, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { resolveChatScope } from "../core/chat-scope.mjs";
 import { artifactsRoot, env, projectRoot, requiredEnv, uploadsRoot, workspaceRoot } from "../core/environment.mjs";
 import { mimeType, publishWorkspaceArtifact, resolveArtifactRequest, safeFilename } from "../core/files.mjs";
 import { newestRequestedArtifact, requestedSlideCount } from "../core/artifact-delivery.mjs";
@@ -127,13 +128,6 @@ async function fetchFile(candidate) {
 	const bytes = Buffer.from(await response.arrayBuffer());
 	if (bytes.length > MAX_FILE) throw new Error("Uploaded file exceeds the configured limit");
 	return { bytes, filename: safeFilename(candidate.name || path.basename(parsed.pathname), `uploaded-document${extensionForMime(response.headers.get("content-type"))}`) };
-}
-
-function conversationKey(req, body) {
-	const conversation = req.headers["x-librechat-conversation-id"] || body.conversationId || body.conversation_id;
-	const user = req.headers["x-librechat-user-id"] || "anonymous";
-	const stable = conversation || createHash("sha256").update(JSON.stringify(body.messages || [])).digest("hex").slice(0, 24);
-	return createHmac("sha256", API_KEY).update(`${user}:${stable}`).digest("hex").slice(0, 32);
 }
 
 function uploadManifestPath(directory) {
@@ -640,6 +634,8 @@ async function serveArtifact(res, pathname) {
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+// Chat folder names are built from this secret, so never start without it.
+requiredEnv("JS_IDENTITY_SECRET");
 // One user's failed request must not end the process serving every other user.
 process.on("unhandledRejection", (reason) => console.error(`[junior-silva-v2] Unhandled rejection: ${reason?.stack || reason}`));
 await Promise.all([mkdir(artifactsRoot, { recursive: true }), mkdir(uploadsRoot, { recursive: true }), mkdir(workspaceRoot, { recursive: true }), mkdir(SESSION_ROOT, { recursive: true }), mkdir(AGENT_ROOT, { recursive: true }), mkdir(auditRoot, { recursive: true })]);
@@ -675,11 +671,11 @@ const server = createServer(async (req, res) => {
 		if (req.method === "GET" && url.pathname === "/v1/models") return json(res, 200, { object: "list", data: [{ id: MODEL, object: "model", created: 0, owned_by: "paralegal.lk" }] });
 		if (req.method === "POST" && url.pathname === "/v1/chat/completions") {
 			const body = await requestBody(req);
+			const { chatHash: key } = resolveChatScope(req.headers, body);
 			const messages = Array.isArray(body.messages) ? body.messages : [];
 			const uploadText = textUploads(messages);
 			const candidates = fileCandidates(body);
 			if (!uploadText.instruction && !uploadText.files.length && !candidates.length) return json(res, 400, { error: { message: "A user message or document is required", type: "invalid_request_error" } });
-			const key = conversationKey(req, body);
 			const files = await saveUploads(key, candidates, uploadText.files);
 			const id = `chatcmpl-${randomUUID()}`;
 			const streaming = body.stream !== false;

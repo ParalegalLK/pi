@@ -115,7 +115,7 @@ GEMINI_API_KEY=YOUR_GEMINI_KEY
 | Translation | `TRANSLATOR_API_KEY=...`; needed for translation requests. The template already supplies the public Translator base URL. |
 | Lex Acts/constitutional source detail | `JUNIOR_LEX_LEGISLATION_ENABLED=true`, `JUNIOR_LEX_LEGISLATION_API_KEY=...` |
 | Typesense case/book/chunk source detail | `JUNIOR_TYPESENSE_ENABLED=true` plus the scoped source keys. The template supplies only public hosts, ports and collection names. |
-| OpenAI-compatible local endpoint | `JUNIOR_SILVA_API_KEY=...` and `JUNIOR_SILVA_ARTIFACT_SECRET=...` |
+| OpenAI-compatible local endpoint | `JUNIOR_SILVA_API_KEY=...`, `JUNIOR_SILVA_ARTIFACT_SECRET=...` and `JS_IDENTITY_SECRET=...` |
 
 RAG should be treated as a core configuration item for a capable Sri Lankan legal assistant. The remaining entries are capability-specific: users who need current law/news should enable web search, and users who need translation should configure the Translator.
 
@@ -189,7 +189,10 @@ Before Docker mode, set these endpoint secrets in `.env`:
 ```dotenv
 JUNIOR_SILVA_API_KEY=GENERATE_A_LONG_RANDOM_VALUE
 JUNIOR_SILVA_ARTIFACT_SECRET=GENERATE_A_SECOND_LONG_RANDOM_VALUE
+JS_IDENTITY_SECRET=GENERATE_A_THIRD_LONG_RANDOM_VALUE
 ```
+
+The endpoint won't start without `JS_IDENTITY_SECRET`. Chat folder names are built from it, so don't change it after go-live, or chats lose their folders.
 
 Windows:
 

@@ -41,6 +41,7 @@ test("a malformed artifact path does not stop the running server", async (t) => 
 		env: {
 			...process.env,
 			JUNIOR_SILVA_API_KEY: "test-junior-silva-key",
+			JS_IDENTITY_SECRET: "test-identity-secret",
 			JUNIOR_SILVA_BIND_HOST: "127.0.0.1",
 			JUNIOR_SILVA_PORT: String(port),
 			JUNIOR_SILVA_DATA_ROOT: root,
