@@ -108,7 +108,6 @@ pi/
 │   ├── server/
 │   │   └── openai.mjs                       OpenAI bridge, HMAC conversation sessions, upload manifest/deduplication and SSE progress
 │   ├── services/
-│   │   ├── code-runner.mjs                  isolated JSON-only JavaScript transformation runner
 │   │   ├── drafter.mjs                      legacy adapter retained temporarily; not exposed by production MCP
 │   │   ├── preview.mjs                      presentation adapter around core/previews
 │   │   ├── rag.mjs                          RAG Chat Server adapter and authority extraction
@@ -181,7 +180,6 @@ All tools are declared in junior-silva/mcp/server.mjs and exposed directly by .p
 | translator_siriwardena_translate_document | Translates a supported document. | Returns localized generated files where the service provides them. |
 | translator_siriwardena_translate_text | Translates supplied text. | Avoids unnecessary document drafting. |
 | web_search_public_legal_sources | Searches current public legal/news sources. | No client personal facts in query; use RAG too when current sources may change stable law. |
-| code_runner_data_transform | Executes a small deterministic JavaScript calculation/table transform. | No network, filesystem, modules, shell, or document creation. |
 | workbench_publish_artifact | Publishes a final skill-created workspace artifact. | Only final user-facing artifact files in the configured workspace. |
 | librechat_prepare_document_preview | Generates a side-panel preview for a final artifact. | Preview once per primary final file; never replaces the original download. |
 
@@ -221,7 +219,7 @@ librechat_prepare_document_preview supports DOCX, PDF, PPTX, XLSX, Markdown, TXT
 
 The copied .agents/skills are deliberately available to Pi. Current CLI and hosted bridge launches **do not pass the no-builtin-tools flag**. This allows Pi to read skill instructions and run their scripts/code for legal work products such as presentations, spreadsheets, PDFs and documents.
 
-That is functional but it is a material deployment boundary: the legal-scope extension is an agent-policy guardrail, not a security sandbox. A production deployment that accepts untrusted public users should isolate the Pi process, writable workspace and egress at the container/host level, and should not rely solely on prompts to protect the repository or secrets. The MCP code_runner_data_transform tool is separately constrained and is not equivalent to Pi’s built-in execution capabilities.
+That is functional but it is a material deployment boundary: the legal-scope extension is an agent-policy guardrail, not a security sandbox. A production deployment that accepts untrusted public users should isolate the Pi process, writable workspace and egress at the container/host level, and should not rely solely on prompts to protect the repository or secrets.
 
 ## Configuration and data paths
 

@@ -223,7 +223,6 @@ const safeToolProgress = Object.freeze({
 	web_search_public_legal_sources: "Checking current public legal sources and recent developments…",
 	translator_siriwardena_translate_document: "Translating the document while preserving its legal meaning…",
 	translator_siriwardena_translate_text: "Translating the supplied text while preserving its legal meaning…",
-	code_runner_data_transform: "Calculating and organising the requested legal information…",
 	workbench_publish_artifact: "Preparing the completed file for secure download…",
 	librechat_prepare_document_preview: "Preparing an in-chat preview of the completed document…",
 });

@@ -180,25 +180,19 @@ Contract: required `file_path`, `target_language`; optional `instructions`.
 
 Contract: required `query` of 3–320 characters; optional `max_results` 1–10.
 
-11. `code_runner_data_transform`
-
-> Run a small JavaScript data transformation for calculations, schedules, tables, or structured analysis. This is an isolated data-only runner: no network, filesystem, modules, shell commands, or document creation. Code receives `input` and must return a JSON-serializable value. Use it when calculation or deterministic reshaping materially improves a legal work product; do not use it for ordinary prose.
-
-Contract: required `code`, optional JSON `input`. The code is limited to 12,000 characters, 1.5 seconds, and 256 KB output.
-
-12. `workbench_publish_artifact`
+11. `workbench_publish_artifact`
 
 > Publish a completed legal artifact that Pi created with a document skill in Junior Silva's workspace. Call this after creating a final PPTX, XLSX, DOCX, PDF, Markdown, text, or JSON file so the user receives a protected download URL. Do not publish source scripts, temporary files, or files outside Junior Silva's workspace.
 
 Contract: required absolute workspace `file_path`; optional safe `title`.
 
-13. `translator_siriwardena_translate_text`
+12. `translator_siriwardena_translate_text`
 
 > Translate supplied text between English, Sinhala, and Tamil with Translator Siriwardena.
 
 Contract: required `text`, `target_language`.
 
-14. `librechat_prepare_document_preview`
+13. `librechat_prepare_document_preview`
 
 > Prepare a safe user-visible LibreChat side-panel preview for one completed local DOCX, PDF, PPTX, XLSX, Markdown, text, or JSON deliverable. DEFAULT DELIVERY RULE: after the final user-facing artifact exists, call this once for the primary final file before replying, unless the user asked for download-only output or the result is a short chat-only email. Use the completed file path returned by Reviewer Perera, Drafter Weeramantry, Translator Siriwardena, or workbench_publish_artifact. Do not use it for intermediate files, source scripts, duplicate formats, internal working files, or an artifact already previewed in this turn. It does not modify the original file or replace its protected download.
 
@@ -245,4 +239,4 @@ So, for example:
 
 - **Usage:** The same host aggregates Pi assistant usage from the session and emits OpenAI `usage` in normal responses, or a final streaming usage frame when LibreChat requests it.
 
-- **Code execution distinction:** `code_runner_data_transform` is intentionally restricted. Pi’s normal built-in `bash` tool is what executes document-skill scripts for DOCX/PDF/PPTX/XLSX generation. This is why the document skills can run Python, Node, Pandoc, LibreOffice, and their provided scripts.
+- **Code execution:** Pi’s normal built-in `bash` tool is what executes document-skill scripts for DOCX/PDF/PPTX/XLSX generation. This is why the document skills can run Python, Node, Pandoc, LibreOffice, and their provided scripts.
