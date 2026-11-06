@@ -474,7 +474,23 @@ async function appendedSessionUsage(directory, sizesBefore) {
 	return changedFiles === 1 ? totals : undefined;
 }
 
-async function runPi(prompt, sessionId, onProgress, chat, requestWorkspace) {
+const STOP_GRACE_MS = 5_000;
+const NOT_COMPLETE_NOTE = "**This answer isn't complete.** The AI service stopped before it finished, so please don't rely on the text below. Send your message again to retry, and contact the administrator if this keeps happening.";
+const CUT_OFF_NOTE = "**This answer was cut off** because it reached the length limit, so it's incomplete. You can ask me to continue.";
+const NO_ANSWER_NOTE = "**I couldn't finish this answer.** The AI service stopped before it wrote anything. Send your message again to retry, and contact the administrator if this keeps happening.";
+
+// Pi exits as a success even when a model call fails, so only its last message says how the
+// run ended. Only "stop" means finished. No stop reason means an extension answered without
+// a model call. The notes are fixed text, because LibreChat shows error text word for word.
+function finishedAnswer(text, stopReason) {
+	const answer = text.trim();
+	if (stopReason === undefined || stopReason === "stop") return answer;
+	if (!answer) return NO_ANSWER_NOTE;
+	if (stopReason === "length") return `${answer}\n\n---\n\n${CUT_OFF_NOTE}`;
+	return `${NOT_COMPLETE_NOTE}\n\n---\n\n${answer}`;
+}
+
+async function runPi(prompt, sessionId, onProgress, chat, requestWorkspace, signal) {
 	// Hosted Pi uses administrator-owned legal MCP registration. Its normal built-in
 	// tools remain subject to the legal-scope extension and deployment sandbox.
 	const args = [
@@ -497,6 +513,8 @@ async function runPi(prompt, sessionId, onProgress, chat, requestWorkspace) {
 	const timeoutMs = Number(env("JUNIOR_SILVA_PI_TIMEOUT_MS", "1200000"));
 	const runToken = createRunToken(chat, timeoutMs);
 	return new Promise((resolve, reject) => {
+		// A message whose connection closed while it waited in the queue never starts Pi.
+		signal.throwIfAborted();
 		const child = spawn(process.execPath, args, { cwd: projectRoot, env: agentEnvironment(chat.folders, requestWorkspace, runToken), stdio: ["ignore", "pipe", "pipe"] });
 		// The service-level SSE keepalive is intentionally invisible. This bounded
 		// timer is different: it tells the user that Pi is still alive when a
@@ -505,6 +523,10 @@ async function runPi(prompt, sessionId, onProgress, chat, requestWorkspace) {
 		let buffer = "";
 		let stderr = "";
 		let finalText = "";
+		let stopReason;
+		let failure;
+		let stopError;
+		let forceTimer;
 		let artifactPublished = false;
 		const usageTotals = createUsageTotals();
 		const usageResponseIds = new Set();
@@ -525,7 +547,10 @@ async function runPi(prompt, sessionId, onProgress, chat, requestWorkspace) {
 					if (event.type === "message_update" && event.assistantMessageEvent?.type === "message_end") {
 						recordAssistantUsage({ ...event.assistantMessageEvent.message, usage: event.usage });
 					}
-					if (event.type === "message_end" && event.message?.role === "custom" && event.message?.customType === "junior-silva-scope" && typeof event.message?.content === "string") finalText = event.message.content;
+					if (event.type === "message_end" && event.message?.role === "custom" && event.message?.customType === "junior-silva-scope" && typeof event.message?.content === "string") {
+						finalText = event.message.content;
+						stopReason = undefined;
+					}
 					thoughtController.handle(event);
 					if (event.type === "tool_execution_start") {
 						const tool = event.toolName || event.tool_name;
@@ -541,21 +566,50 @@ async function runPi(prompt, sessionId, onProgress, chat, requestWorkspace) {
 					if (event.type === "message" && event.message?.role === "assistant") recordAssistantUsage(event.message);
 					if (event.type === "message_end" && event.message?.role === "assistant") {
 						finalText = (event.message.content || []).filter((part) => part.type === "text").map((part) => part.text || "").join("\n");
+						stopReason = event.message.stopReason;
+						failure = event.message.errorMessage;
 						recordAssistantUsage(event.message);
 					}
 				} catch { }
 			}
 		});
 		child.stderr.on("data", (chunk) => { stderr = `${stderr}${chunk.toString()}`.slice(-12_000); });
-		const timeout = setTimeout(() => { clearInterval(thoughtLivenessTimer); child.kill("SIGTERM"); reject(new Error("Pi request timed out")); }, timeoutMs);
-		child.on("error", (error) => { clearTimeout(timeout); clearInterval(thoughtLivenessTimer); reject(error); });
-		child.on("close", (code) => {
+		// Asks Pi to stop, which also stops the commands it started, then forces it. A process Pi
+		// left behind can hold its pipes open, so they're closed too, or "close" might never fire.
+		const stopPi = (error) => {
+			if (stopError) return;
+			stopError = error;
+			revokeRunToken(runToken);
+			child.kill("SIGTERM");
+			forceTimer = setTimeout(() => {
+				child.kill("SIGKILL");
+				child.stdout.destroy();
+				child.stderr.destroy();
+			}, STOP_GRACE_MS);
+		};
+		const onStop = () => {
+			console.log(`[junior-silva-v2] Stopping the run for chat ${chat.chatHash}, because its connection closed.`);
+			stopPi(new Error("The run was stopped"));
+		};
+		const timeout = setTimeout(() => stopPi(new Error("Pi request timed out")), timeoutMs);
+		const cleanUp = () => {
 			clearTimeout(timeout);
+			clearTimeout(forceTimer);
 			clearInterval(thoughtLivenessTimer);
+			signal.removeEventListener("abort", onStop);
+		};
+		signal.addEventListener("abort", onStop, { once: true });
+		child.on("error", (error) => { cleanUp(); reject(error); });
+		// Settling only here means the next message in this chat can't start while this Pi is still running.
+		child.on("close", (code) => {
+			cleanUp();
+			if (stopError) return reject(stopError);
 			if (code !== 0) return reject(new Error(`Pi exited with code ${code}: ${stderr.replace(/\s+/g, " ").slice(0, 1200)}`));
-			if (!finalText.trim()) return reject(new Error("Pi returned no final answer"));
+			const answer = finishedAnswer(finalText, stopReason);
+			if (!answer) return reject(new Error("Pi returned no final answer"));
+			if (stopReason !== undefined && stopReason !== "stop") console.error(`[junior-silva-v2] Pi's run for chat ${chat.chatHash} ended early: ${`${stopReason}: ${failure || "no details"}`.replace(/\s+/g, " ").slice(0, 320)}`);
 			void appendedSessionUsage(chat.folders.sessions, sessionSizesBefore).then((persistedUsage) => {
-				resolve({ answer: finalText.trim(), usage: openAiUsage(persistedUsage) || openAiUsage(usageTotals), elapsedMs: Date.now() - startedAt, artifactPublished });
+				resolve({ answer, usage: openAiUsage(persistedUsage) || openAiUsage(usageTotals), elapsedMs: Date.now() - startedAt, artifactPublished });
 			}).catch(reject);
 		});
 	}).finally(() => revokeRunToken(runToken));
@@ -582,7 +636,7 @@ async function publishRecoveredArtifact(candidate, instruction) {
 	return publication;
 }
 
-async function recoverUndeliveredArtifact({ instruction, chat, requestWorkspace, sessionId, initial, onProgress }) {
+async function recoverUndeliveredArtifact({ instruction, chat, requestWorkspace, sessionId, initial, onProgress, signal }) {
 	if (initial.artifactPublished) return initial;
 	let candidate = await newestRequestedArtifact(requestWorkspace, instruction);
 	if (!candidate) return initial;
@@ -597,8 +651,10 @@ async function recoverUndeliveredArtifact({ instruction, chat, requestWorkspace,
 		onProgress,
 		chat,
 		requestWorkspace,
+		signal,
 	).catch(() => undefined);
 	if (repair?.artifactPublished) return repair;
+	if (signal.aborted) return initial;
 
 	// Pi created a valid file but omitted the final tool call. Publish only a file
 	// from this request's private workspace; never guess from a shared workspace.
@@ -684,6 +740,12 @@ await writeFile(path.join(AGENT_ROOT, "mcp.json"), `${JSON.stringify({
 }, null, 2)}\n`, "utf8");
 const server = createServer(async (req, res) => {
 	let heartbeat;
+	// LibreChat's Stop button closes this connection, and nobody can receive an answer after that.
+	const stop = new AbortController();
+	res.once("close", () => {
+		clearInterval(heartbeat);
+		stop.abort();
+	});
 	try {
 		const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
 		if (req.method === "GET" && url.pathname === "/health") return json(res, 200, { status: "ok", service: MODEL, pi: "1.0.0" });
@@ -718,8 +780,8 @@ const server = createServer(async (req, res) => {
 			if (streaming) { startStream(res, id); heartbeat = setInterval(() => res.write(": keep-alive\n\n"), 15_000); }
 			const onProgress = (message) => { if (streaming) streamDelta(res, id, "reasoning_content", `${message}\n`); };
 			const result = await serial(key, () => runInChat(chat, async () => {
-				const initial = await runPi(piPrompt(uploadText.instruction, files, requestWorkspace), `junior-silva-v2-${key}`, onProgress, chat, requestWorkspace);
-				return recoverUndeliveredArtifact({ instruction: uploadText.instruction, chat, requestWorkspace, sessionId: `junior-silva-v2-${key}`, initial, onProgress });
+				const initial = await runPi(piPrompt(uploadText.instruction, files, requestWorkspace), `junior-silva-v2-${key}`, onProgress, chat, requestWorkspace, stop.signal);
+				return recoverUndeliveredArtifact({ instruction: uploadText.instruction, chat, requestWorkspace, sessionId: `junior-silva-v2-${key}`, initial, onProgress, signal: stop.signal });
 			}));
 			if (heartbeat) clearInterval(heartbeat);
 			if (streaming) return finishStream(res, id, result.answer, includeStreamUsage ? result.usage : undefined);
@@ -728,6 +790,8 @@ const server = createServer(async (req, res) => {
 		return json(res, 404, { error: { message: "Not found", type: "invalid_request_error" } });
 	} catch (error) {
 		if (heartbeat) clearInterval(heartbeat);
+		// Nobody is waiting for an answer, and a stop isn't a failure.
+		if (stop.signal.aborted) return;
 		console.error(`[junior-silva-v2] ${error?.stack || error}`);
 		const status = Number(error?.status || 500);
 		const message = status < 500 ? error.message : "Junior Silva could not complete this request. Please retry or contact the administrator.";
@@ -739,4 +803,4 @@ const server = createServer(async (req, res) => {
 server.listen(PORT, HOST, () => console.log(`[junior-silva-v2] listening on ${HOST}:${PORT}`));
 }
 
-export { agentEnvironment, conversationUploadPaths, fileCandidates, messageText, piPrompt, publishRecoveredArtifact, saveUploads, serveArtifact, splitTextEnvelope, textUploads };
+export { agentEnvironment, conversationUploadPaths, fileCandidates, finishedAnswer, messageText, piPrompt, publishRecoveredArtifact, saveUploads, serveArtifact, splitTextEnvelope, textUploads };
