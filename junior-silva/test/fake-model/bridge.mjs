@@ -1,5 +1,5 @@
-// Test only: starts the real bridge, which starts real Pi, with Pi pointed at a fake model instead of
-// Anthropic. Pi gets no real key: the bridge has no ANTHROPIC_API_KEY, and models.json holds a fake one.
+// Test only: starts the real bridge, which starts real Pi. Pi calls the bridge's model proxy with its run
+// token, and the proxy calls a fake model instead of Anthropic, with a stand-in for the real key.
 import { spawn } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -8,24 +8,20 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const serverPath = fileURLToPath(new URL("../../server/openai.mjs", import.meta.url));
-export const FAKE_MODEL_KEY = "fake-model-key";
 // Stands in for the real Anthropic key, which only the bridge's model proxy holds.
 export const PROXY_REAL_KEY = "real-key-for-tests";
 export const TEST_MODEL = "claude-sonnet-5-5";
 const API_KEY = "test-junior-silva-key";
 const USER = "aaaaaaaaaaaaaaaaaaaaaa40";
 
-// With throughProxy, Pi calls the bridge's model proxy with its run token, and the proxy calls the fake
-// with the key it holds. Otherwise Pi calls the fake directly.
-export async function startBridgeWithFakeModel(fakeModelUrl, { throughProxy = false, environment: overrides = {} } = {}) {
+export async function startBridgeWithFakeModel(fakeModelUrl, { environment: overrides = {} } = {}) {
 	const root = await mkdtemp(path.join(os.tmpdir(), "junior-silva-fake-model-"));
+	// The shared settings folder each run's own folder copies from.
 	const agentDir = path.join(root, "pi-agent");
 	await mkdir(agentDir, { recursive: true });
-	const port = 20000 + Math.floor(Math.random() * 20000);
-	const provider = throughProxy ? { baseUrl: `http://127.0.0.1:${port + 1}/model/anthropic`, apiKey: "$JS_RUN_TOKEN" } : { baseUrl: fakeModelUrl, apiKey: FAKE_MODEL_KEY };
-	await writeFile(path.join(agentDir, "models.json"), `${JSON.stringify({ providers: { anthropic: provider } })}\n`);
 	// Cache warming would make extra model calls in the background.
 	await writeFile(path.join(agentDir, "settings.json"), `${JSON.stringify({ cacheWarming: "off" })}\n`);
+	const port = 20000 + Math.floor(Math.random() * 20000);
 	const environment = {
 		...process.env,
 		JUNIOR_SILVA_API_KEY: API_KEY,
@@ -40,10 +36,10 @@ export async function startBridgeWithFakeModel(fakeModelUrl, { throughProxy = fa
 		PI_CODING_AGENT_DIR: agentDir,
 		PI_PROVIDER: "anthropic",
 		PI_MODEL: TEST_MODEL,
-		...(throughProxy ? { ANTHROPIC_API_KEY: PROXY_REAL_KEY, JS_MODEL_UPSTREAM: fakeModelUrl } : {}),
+		ANTHROPIC_API_KEY: PROXY_REAL_KEY,
+		JS_MODEL_UPSTREAM: fakeModelUrl,
 		...overrides,
 	};
-	if (!throughProxy) delete environment.ANTHROPIC_API_KEY;
 	delete environment.PI_THINKING;
 	const child = spawn(process.execPath, [serverPath], { env: environment, stdio: ["ignore", "pipe", "pipe"] });
 	const bridge = { port, root, child, log: "" };
@@ -106,4 +102,12 @@ export function piProcesses(bridge) {
 			return false;
 		}
 	});
+}
+
+// One process's settings, as name/value pairs.
+export function processSettings(pid) {
+	return Object.fromEntries(readFileSync(`/proc/${pid}/environ`, "utf8").split("\0").filter(Boolean).map((entry) => {
+		const split = entry.indexOf("=");
+		return [entry.slice(0, split), entry.slice(split + 1)];
+	}));
 }

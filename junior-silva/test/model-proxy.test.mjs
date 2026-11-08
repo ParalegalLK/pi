@@ -246,7 +246,7 @@ test("when Pi hangs up mid-answer, the call to the model is cancelled", async ()
 
 test("real Pi works through the proxy, and everything it sends is allowed", async () => {
 	const fake = await newFake();
-	const bridge = await startBridgeWithFakeModel(fake.url, { throughProxy: true });
+	const bridge = await startBridgeWithFakeModel(fake.url);
 	servers.push(bridge);
 	fake.script([{ text: "FAKE: through the proxy." }]);
 	const plain = await ask(bridge, "proxy-chat-1", "What is a plaint?");

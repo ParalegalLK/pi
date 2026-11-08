@@ -34,6 +34,9 @@ async function startBridge(overrides = {}) {
 			JS_NATIVE_DEV: "",
 			JUNIOR_SILVA_BIND_HOST: "127.0.0.1",
 			JUNIOR_SILVA_PORT: String(port),
+			PI_PROVIDER: "anthropic",
+			PI_MODEL: "claude-sonnet-5-5",
+			ANTHROPIC_API_KEY: "test-anthropic-key",
 			JUNIOR_SILVA_PUBLIC_URL: `http://127.0.0.1:${port}`,
 			JUNIOR_SILVA_DATA_ROOT: root,
 			JUNIOR_SILVA_ARTIFACT_ROOT: path.join(root, "artifacts"),
@@ -178,6 +181,15 @@ for (const stream of [true, false]) {
 		assert.ok(Date.now() - sentAt < GRACE - SECOND, "the next message had to wait");
 	});
 }
+
+test("the prompt reaches Pi on stdin, not on its command line, with its own settings folder", async () => {
+	const run = scenario("OK");
+	assert.equal((await ask(bridge, run.chatId, run.text)).answer, "FAKE-ANSWER");
+	const [started] = await piNotes(bridge, run.tag);
+	assert.equal(started.promptOnCommandLine, false);
+	assert.match(started.settingsFolder, /\/pi-runs\/run-/);
+	assert.equal(existsSync(started.settingsFolder), false, "the run's settings folder is removed afterwards");
+});
 
 test("a Pi that ignores the request to stop is forced, and the next message waits for that", async () => {
 	const run = await startRun(bridge, "STUCK", { event: "ready" });

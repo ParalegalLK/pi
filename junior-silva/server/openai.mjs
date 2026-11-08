@@ -3,7 +3,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { constants, existsSync } from "node:fs";
-import { appendFile, mkdir, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, copyFile, mkdir, mkdtemp, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { createChatFolders, resolveChatScope, runInChat } from "../core/chat-scope.mjs";
@@ -26,6 +26,27 @@ const ATTACHMENT_ORIGINS = new Set(env("JUNIOR_SILVA_ATTACHMENT_ORIGINS").split(
 const auditRoot = path.join(path.dirname(artifactsRoot), "audit");
 // Pi runs inside this container until P3 gives each run its own address.
 const LOCAL_PI_ADDRESS = "127.0.0.1";
+// Each run gets its own settings folder in here, removed when the run ends.
+const RUNS_ROOT = path.join(path.dirname(artifactsRoot), "pi-runs");
+// Pi's model calls go through the bridge's model proxy, which has an Anthropic route only.
+const PI_MODEL = env("PI_MODEL");
+// Pi fills in $JS_RUN_TOKEN from its own settings when it calls the model, so the token is never
+// written to disk. The proxy swaps it for the real key.
+const PI_MODELS_SETTINGS = `${JSON.stringify({ providers: { anthropic: { baseUrl: `http://${LOCAL_PI_ADDRESS}:${GATEWAY_PORT}/model/anthropic`, apiKey: "$JS_RUN_TOKEN" } } }, null, 2)}\n`;
+// Hosted mode uses an administrator-owned MCP registration. It does not bypass Pi's
+// project-trust prompt or approve arbitrary project-local code.
+const PI_MCP_SETTINGS = `${JSON.stringify({
+	mcpServers: {
+		"junior-silva-legal": {
+			command: process.execPath,
+			args: [path.join(projectRoot, "junior-silva", "mcp", "launcher.mjs")],
+			cwd: projectRoot,
+			exposure: "direct",
+			timeout: 1200,
+			description: "Independent Sri Lankan legal research, native source-anchored review, native drafting, and translation tools.",
+		},
+	},
+}, null, 2)}\n`;
 
 function json(res, status, value) {
 	const body = JSON.stringify(value);
@@ -398,16 +419,21 @@ function safeAuditToolName(toolName) {
 			/^(write|edit|create_file|apply_patch)$/i.test(raw) ? "builtin_write" : "builtin_or_unrecognized");
 }
 
-function agentEnvironment(folders, requestWorkspace, runToken) {
-	const output = {
-		PATH: process.env.PATH || "",
+// Pi's settings hold no model key: its model calls go through the bridge's model proxy with the run token.
+function agentEnvironment(folders, requestWorkspace, runToken, settingsFolder) {
+	return {
+		// Pi downloaded rg and fd into the shared folder's bin once. It looks there and on PATH.
+		PATH: [process.env.PATH, path.join(AGENT_ROOT, "bin")].filter(Boolean).join(path.delimiter),
 		HOME: process.env.HOME || "",
 		LANG: process.env.LANG || "C.UTF-8",
 		TERM: process.env.TERM || "xterm-256color",
 		TZ: "Asia/Colombo",
 		PI_CODING_AGENT_SESSION_DIR: folders.sessions,
-		PI_CODING_AGENT_DIR: AGENT_ROOT,
+		PI_CODING_AGENT_DIR: settingsFolder,
 		PI_SKIP_VERSION_CHECK: "1",
+		// No catalog refreshes or downloads. Model calls and tools aren't affected.
+		PI_OFFLINE: "1",
+		PI_TELEMETRY: "0",
 		JUNIOR_SILVA_MCP_GATEWAY_URL: `http://${LOCAL_PI_ADDRESS}:${GATEWAY_PORT}/internal/mcp`,
 		JS_RUN_TOKEN: runToken,
 		JUNIOR_SILVA_DATA_ROOT: path.dirname(artifactsRoot),
@@ -415,10 +441,18 @@ function agentEnvironment(folders, requestWorkspace, runToken) {
 		JUNIOR_SILVA_UPLOAD_ROOT: folders.uploads,
 		JUNIOR_SILVA_WORKSPACE_ROOT: requestWorkspace,
 	};
-	const provider = env("PI_PROVIDER", "google");
-	if (provider === "anthropic" && process.env.ANTHROPIC_API_KEY) output.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-	if (provider === "google" && process.env.GEMINI_API_KEY) output.GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-	return output;
+}
+
+// A fresh settings folder for each run, so a run can't leave changed settings behind for the next one,
+// which may be another user's. It has no auth.json, so no stored key can outrank the run token.
+async function createPiSettings() {
+	const folder = await mkdtemp(path.join(RUNS_ROOT, "run-"));
+	await Promise.all([
+		writeFile(path.join(folder, "models.json"), PI_MODELS_SETTINGS, { mode: 0o600 }),
+		writeFile(path.join(folder, "mcp.json"), PI_MCP_SETTINGS, { mode: 0o600 }),
+		...["settings.json", "models-store.json"].map((name) => copyFile(path.join(AGENT_ROOT, name), path.join(folder, name)).catch(() => {})),
+	]);
+	return folder;
 }
 
 async function audit(sessionId, event) {
@@ -497,19 +531,22 @@ async function runPi(prompt, sessionId, onProgress, chat, requestWorkspace, sign
 		"--extension", path.join(projectRoot, ".pi", "extensions", "legal-research-citation-delivery.ts"),
 		"--extension", path.join(projectRoot, ".pi", "extensions", "librechat-preview-delivery.ts"),
 	];
-	if (env("PI_PROVIDER")) args.push("--provider", env("PI_PROVIDER"));
-	if (env("PI_MODEL")) args.push("--model", env("PI_MODEL"));
+	args.push("--provider", "anthropic", "--model", PI_MODEL);
 	if (env("PI_THINKING")) args.push("--thinking", env("PI_THINKING"));
-	args.push(prompt);
 	const sessionSizesBefore = await sessionFileSizes(chat.folders.sessions);
 	const startedAt = Date.now();
 	const thoughtController = createThoughtController(onProgress);
 	const timeoutMs = Number(env("JUNIOR_SILVA_PI_TIMEOUT_MS", "1200000"));
+	const settingsFolder = await createPiSettings();
 	const runToken = createRunToken(chat, timeoutMs, LOCAL_PI_ADDRESS);
 	return new Promise((resolve, reject) => {
 		// A message whose connection closed while it waited in the queue never starts Pi.
 		signal.throwIfAborted();
-		const child = spawn(process.execPath, args, { cwd: projectRoot, env: agentEnvironment(chat.folders, requestWorkspace, runToken), stdio: ["ignore", "pipe", "pipe"] });
+		const child = spawn(process.execPath, args, { cwd: projectRoot, env: agentEnvironment(chat.folders, requestWorkspace, runToken, settingsFolder), stdio: ["pipe", "pipe", "pipe"] });
+		// The prompt goes in on stdin, not on the command line: every process can read a command line,
+		// and Linux limits one command-line argument to 128 KB, too small for a long pasted contract.
+		child.stdin.on("error", () => {});
+		child.stdin.end(prompt);
 		// The service-level SSE keepalive is intentionally invisible. This bounded
 		// timer is different: it tells the user that Pi is still alive when a
 		// legitimate document or research step produces no lifecycle event.
@@ -606,7 +643,10 @@ async function runPi(prompt, sessionId, onProgress, chat, requestWorkspace, sign
 				resolve({ answer, usage: openAiUsage(persistedUsage) || openAiUsage(usageTotals), elapsedMs: Date.now() - startedAt, artifactPublished });
 			}).catch(reject);
 		});
-	}).finally(() => revokeRunToken(runToken));
+	}).finally(async () => {
+		revokeRunToken(runToken);
+		await rm(settingsFolder, { recursive: true, force: true });
+	});
 }
 
 function artifactDeliveryText(publication) {
@@ -715,23 +755,16 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
 requiredEnv("JS_IDENTITY_SECRET");
 requiredEnv("JUNIOR_SILVA_ARTIFACT_SECRET");
 if (env("JS_NATIVE_DEV")) throw new Error("JS_NATIVE_DEV is only for the native CLI. Remove it from the bridge's settings.");
+// Pi's model calls go through the model proxy, which has an Anthropic route only (task/plan.md 3.8).
+if (env("PI_PROVIDER", "anthropic") !== "anthropic") throw new Error("PI_PROVIDER must be anthropic. Pi's model calls go through the bridge's model proxy, which has no route for other providers yet.");
+requiredEnv("PI_MODEL");
+requiredEnv("ANTHROPIC_API_KEY");
 // One user's failed request must not end the process serving every other user.
 process.on("unhandledRejection", (reason) => console.error(`[junior-silva-v2] Unhandled rejection: ${reason?.stack || reason}`));
 await Promise.all([mkdir(AGENT_ROOT, { recursive: true }), mkdir(auditRoot, { recursive: true })]);
-// Hosted mode uses an administrator-owned global MCP registration. It does not
-// bypass Pi's project-trust prompt or approve arbitrary project-local code.
-await writeFile(path.join(AGENT_ROOT, "mcp.json"), `${JSON.stringify({
-	mcpServers: {
-		"junior-silva-legal": {
-			command: process.execPath,
-			args: [path.join(projectRoot, "junior-silva", "mcp", "launcher.mjs")],
-			cwd: projectRoot,
-			exposure: "direct",
-			timeout: 1200,
-			description: "Independent Sri Lankan legal research, native source-anchored review, native drafting, and translation tools.",
-		},
-	},
-}, null, 2)}\n`, "utf8");
+// Settings folders left behind by a crash aren't in use any more.
+await rm(RUNS_ROOT, { recursive: true, force: true });
+await mkdir(RUNS_ROOT, { recursive: true, mode: 0o700 });
 const server = createServer(async (req, res) => {
 	let heartbeat;
 	// LibreChat's Stop button closes this connection, and nobody can receive an answer after that.

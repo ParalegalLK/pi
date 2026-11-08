@@ -98,7 +98,7 @@ RAG_BASE_URL=https://YOUR_ORG_RAG_HOST
 RAG_API_KEY=YOUR_RAG_KEY
 ```
 
-To use Gemini instead, set all three model values coherently:
+To use Gemini with the native CLI, set all three model values coherently. The hosted V2 bridge accepts only `PI_PROVIDER=anthropic` for now, because Pi's model calls go through its model proxy, which has no Google route yet:
 
 ```dotenv
 PI_PROVIDER=google

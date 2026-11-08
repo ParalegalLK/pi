@@ -227,7 +227,7 @@ That is functional but it is a material deployment boundary: the legal-scope ext
 
 | Group | Examples | Purpose |
 | --- | --- | --- |
-| Pi model | PI_PROVIDER, PI_MODEL, provider API key | Pi’s reasoning model. |
+| Pi model | PI_PROVIDER, PI_MODEL, provider API key | Pi’s reasoning model. In the hosted bridge the key stays in the bridge: Pi calls the bridge’s model proxy with a run token, and the proxy adds the key. The bridge supports Anthropic only. |
 | legal services | RAG_*, TRANSLATOR_* | Active external legal-research and translation endpoints. Legacy Reviewer/Drafter variables may remain during migration but are not used by the production MCP server. |
 | direct source detail | JUNIOR_TYPESENSE_*, JUNIOR_LEX_LEGISLATION_* | Optional bounded detail behind RAG-cited cases, passages and books (source-scoped Typesense) plus original Acts/constitutional material and exact sections (Lex API using an internal read-only `X-API-Key`). These values never reach Pi or the user. |
 | private precedents | JUNIOR_SILVA_KB_ROOT, JUNIOR_SILVA_KB_HOST_PATH | Optional host-mounted, read-only Drafter precedent corpus; never copied into the image or repository. |

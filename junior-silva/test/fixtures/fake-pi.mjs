@@ -4,7 +4,13 @@ import { spawn } from "node:child_process";
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-const prompt = process.argv.at(-1);
+// Like Pi, the stand-in gets its prompt on stdin.
+const prompt = await new Promise((resolve) => {
+	let text = "";
+	process.stdin.setEncoding("utf8");
+	process.stdin.on("data", (chunk) => { text += chunk; });
+	process.stdin.on("end", () => resolve(text));
+});
 const workspace = process.env.JUNIOR_SILVA_WORKSPACE_ROOT;
 const dataRoot = process.env.JUNIOR_SILVA_DATA_ROOT;
 const isRepair = prompt.startsWith("A requested deliverable exists");
@@ -61,5 +67,5 @@ const scenarios = {
 	NO_TEXT: () => answer(""),
 };
 
-note({ event: "started" });
+note({ event: "started", promptOnCommandLine: process.argv.slice(2).some((arg) => arg.includes("SCENARIO-")), settingsFolder: process.env.PI_CODING_AGENT_DIR });
 await scenarios[scenario]();

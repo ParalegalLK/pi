@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import { ask, askStreaming, FAKE_MODEL_KEY, piProcesses, send, startBridgeWithFakeModel, TEST_MODEL } from "./fake-model/bridge.mjs";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { ask, askStreaming, piProcesses, processSettings, PROXY_REAL_KEY, send, startBridgeWithFakeModel, TEST_MODEL } from "./fake-model/bridge.mjs";
 import { startFakeModel } from "./fake-model/server.mjs";
 
 let fake;
@@ -80,7 +82,7 @@ test("the fake model sends HTTP errors and stream errors", async () => {
 	}
 });
 
-test("real Pi answers through the fake model, with the fake key and the real tools listed", async () => {
+test("real Pi answers through the proxy, which adds the real key, with the real tools listed", async () => {
 	fake.script([{ text: "FAKE: A plaint starts a civil action." }]);
 	const reply = await ask(bridge, newChat(), "What is a plaint?");
 	assert.equal(reply.status, 200);
@@ -88,7 +90,7 @@ test("real Pi answers through the fake model, with the fake key and the real too
 	assert.equal(fake.requests.length, 1);
 	const [request] = fake.requests;
 	assert.equal(request.path, "/v1/messages?beta=true");
-	assert.equal(request.headers["x-api-key"], FAKE_MODEL_KEY);
+	assert.equal(request.headers["x-api-key"], PROXY_REAL_KEY);
 	assert.equal(request.body.model, TEST_MODEL);
 	assert.equal(request.body.stream, true);
 	assert.ok(request.body.tools.some((tool) => /(^|__)legal_validate_draft$/.test(tool.name)), "the bridge's MCP tools were listed");
@@ -137,6 +139,45 @@ test("with real Pi, a rejected key gives the fixed note after one request, with 
 	assert.match(reply.answer, /^\*\*I couldn't finish this answer\.\*\*/);
 	assert.doesNotMatch(reply.answer, /x-api-key/);
 	assert.equal(fake.requests.length, 1);
+});
+
+test("during a run, real Pi holds no model key, and its own settings folder points at the proxy", async () => {
+	fake.script([{ hold: true }]);
+	const controller = new AbortController();
+	const reply = send(bridge, newChat(), "What is a plaint?", { stream: true, signal: controller.signal }).catch(() => undefined);
+	let folder;
+	try {
+		await waitUntil(() => fake.requests.length === 1, 20_000, "Pi to call the model");
+		const [pid] = piProcesses(bridge);
+		const settings = processSettings(pid);
+		assert.equal(settings.ANTHROPIC_API_KEY, undefined);
+		assert.equal(settings.GEMINI_API_KEY, undefined);
+		assert.ok(!Object.values(settings).includes(PROXY_REAL_KEY), "the real key isn't anywhere in Pi's settings");
+		assert.match(settings.JS_RUN_TOKEN, /^[a-f0-9]{64}$/);
+		assert.equal(settings.PI_OFFLINE, "1");
+		folder = settings.PI_CODING_AGENT_DIR;
+		assert.equal(path.dirname(folder), path.join(bridge.root, "pi-runs"));
+		const models = JSON.parse(readFileSync(path.join(folder, "models.json"), "utf8"));
+		assert.deepEqual(models, { providers: { anthropic: { baseUrl: `http://127.0.0.1:${bridge.port + 1}/model/anthropic`, apiKey: "$JS_RUN_TOKEN" } } });
+		// Pi creates an empty auth.json when it starts. It must hold no stored key, which would outrank the token.
+		const auth = existsSync(path.join(folder, "auth.json")) ? JSON.parse(readFileSync(path.join(folder, "auth.json"), "utf8")) : {};
+		assert.deepEqual(auth, {});
+		assert.equal(existsSync(path.join(folder, "mcp.json")), true);
+	} finally {
+		controller.abort();
+		await reply;
+	}
+	await waitUntil(() => !existsSync(folder), 8_000, "the run's settings folder to be removed");
+});
+
+test("with real Pi, a 300 KB message reaches the model intact, which a command line couldn't carry", async () => {
+	fake.script([{ text: "FAKE: read the long message." }]);
+	const long = `Summarise this pasted contract. ${"Clause text. ".repeat(25_000)}`;
+	assert.ok(Buffer.byteLength(long) > 300_000);
+	const reply = await ask(bridge, newChat(), long);
+	assert.equal(reply.status, 200);
+	assert.equal(reply.answer, "FAKE: read the long message.");
+	assert.ok(JSON.stringify(fake.requests[0].body.messages).includes(long.slice(-1000)), "the end of the message arrived");
 });
 
 test("with real Pi, Stop while it waits for the model ends the run, and the chat goes on", async () => {

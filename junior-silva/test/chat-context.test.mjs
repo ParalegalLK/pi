@@ -107,11 +107,20 @@ test("unknown, empty and expired run tokens give no chat", () => {
 	assert.equal(chatForRunToken(createRunToken(CHAT_A, 0, "127.0.0.1"), "127.0.0.1"), undefined);
 });
 
-test("Pi gets the run token and the gateway's address in its environment", () => {
+test("Pi gets the run token, the gateway's address and its own settings folder, and no model key", (t) => {
+	withEnv(t, "ANTHROPIC_API_KEY", "bridge-only-anthropic-key");
+	withEnv(t, "GEMINI_API_KEY", "bridge-only-gemini-key");
 	const folders = { uploads: "/a/uploads", sessions: "/a/sessions" };
-	const environment = agentEnvironment(folders, "/a/workspace/requests/r1", "run-token-value");
+	const environment = agentEnvironment(folders, "/a/workspace/requests/r1", "run-token-value", "/a/pi-settings");
 	assert.equal(environment.JS_RUN_TOKEN, "run-token-value");
 	assert.equal(environment.JUNIOR_SILVA_MCP_GATEWAY_URL, `http://127.0.0.1:${GATEWAY_PORT}/internal/mcp`);
+	assert.equal(environment.PI_CODING_AGENT_DIR, "/a/pi-settings");
+	assert.equal(environment.PI_OFFLINE, "1");
+	assert.equal(environment.PI_TELEMETRY, "0");
+	assert.match(environment.PATH.split(path.delimiter).at(-1), /pi-agent\/bin$/, "Pi can still find rg and fd");
+	assert.equal(environment.ANTHROPIC_API_KEY, undefined);
+	assert.equal(environment.GEMINI_API_KEY, undefined);
+	assert.doesNotMatch(JSON.stringify(environment), /bridge-only/);
 });
 
 test("a tool call with no chat is refused", async (t) => {
@@ -239,6 +248,9 @@ async function startServer(t, overrides = {}) {
 			JS_NATIVE_DEV: "",
 			JUNIOR_SILVA_BIND_HOST: "127.0.0.1",
 			JUNIOR_SILVA_PORT: String(port),
+			PI_PROVIDER: "anthropic",
+			PI_MODEL: "claude-sonnet-5-5",
+			ANTHROPIC_API_KEY: "test-anthropic-key",
 			JUNIOR_SILVA_DATA_ROOT: root,
 			JUNIOR_SILVA_ARTIFACT_ROOT: path.join(root, "artifacts"),
 			PI_CODING_AGENT_DIR: path.join(root, "pi-agent"),
@@ -277,11 +289,31 @@ test("the tool route is on the gateway port, and refuses a call with no valid ru
 	assert.equal((await post(port, { Authorization: "Bearer test-junior-silva-key" })).status, 404, "the old route on the public port is gone");
 });
 
+// Waits for the server to exit. A server that keeps running fails the test instead of hanging it.
+function exitCode(child, withinMs = 15_000) {
+	return Promise.race([new Promise((resolve) => child.on("exit", resolve)), delay(withinMs).then(() => "still running")]);
+}
+
 test("the bridge refuses to start with the native setting", async (t) => {
 	const { child } = await startServer(t, { JS_NATIVE_DEV: "1" });
 	let stderr = "";
 	child.stderr.on("data", (chunk) => { stderr += chunk; });
-	const code = await new Promise((resolve) => child.on("exit", resolve));
-	assert.notEqual(code, 0);
+	const code = await exitCode(child);
+	assert.ok(typeof code === "number" && code !== 0, `exit: ${code}`);
 	assert.match(stderr, /JS_NATIVE_DEV is only for the native CLI/);
+});
+
+test("the bridge refuses to start without a model setup its proxy can check", async (t) => {
+	for (const [label, overrides, expected] of [
+		["another provider", { PI_PROVIDER: "google" }, /PI_PROVIDER must be anthropic/],
+		["no model", { PI_MODEL: "" }, /PI_MODEL is not configured/],
+		["no Anthropic key", { ANTHROPIC_API_KEY: "" }, /ANTHROPIC_API_KEY is not configured/],
+	]) {
+		const { child } = await startServer(t, overrides);
+		let stderr = "";
+		child.stderr.on("data", (chunk) => { stderr += chunk; });
+		const code = await exitCode(child);
+		assert.ok(typeof code === "number" && code !== 0, `${label}, exit: ${code}`);
+		assert.match(stderr, expected, label);
+	}
 });
