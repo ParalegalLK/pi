@@ -9,18 +9,23 @@ import { fileURLToPath } from "node:url";
 
 const serverPath = fileURLToPath(new URL("../../server/openai.mjs", import.meta.url));
 export const FAKE_MODEL_KEY = "fake-model-key";
+// Stands in for the real Anthropic key, which only the bridge's model proxy holds.
+export const PROXY_REAL_KEY = "real-key-for-tests";
 export const TEST_MODEL = "claude-sonnet-5-5";
 const API_KEY = "test-junior-silva-key";
 const USER = "aaaaaaaaaaaaaaaaaaaaaa40";
 
-export async function startBridgeWithFakeModel(fakeModelUrl, overrides = {}) {
+// With throughProxy, Pi calls the bridge's model proxy with its run token, and the proxy calls the fake
+// with the key it holds. Otherwise Pi calls the fake directly.
+export async function startBridgeWithFakeModel(fakeModelUrl, { throughProxy = false, environment: overrides = {} } = {}) {
 	const root = await mkdtemp(path.join(os.tmpdir(), "junior-silva-fake-model-"));
 	const agentDir = path.join(root, "pi-agent");
 	await mkdir(agentDir, { recursive: true });
-	await writeFile(path.join(agentDir, "models.json"), `${JSON.stringify({ providers: { anthropic: { baseUrl: fakeModelUrl, apiKey: FAKE_MODEL_KEY } } })}\n`);
+	const port = 20000 + Math.floor(Math.random() * 20000);
+	const provider = throughProxy ? { baseUrl: `http://127.0.0.1:${port + 1}/model/anthropic`, apiKey: "$JS_RUN_TOKEN" } : { baseUrl: fakeModelUrl, apiKey: FAKE_MODEL_KEY };
+	await writeFile(path.join(agentDir, "models.json"), `${JSON.stringify({ providers: { anthropic: provider } })}\n`);
 	// Cache warming would make extra model calls in the background.
 	await writeFile(path.join(agentDir, "settings.json"), `${JSON.stringify({ cacheWarming: "off" })}\n`);
-	const port = 20000 + Math.floor(Math.random() * 20000);
 	const environment = {
 		...process.env,
 		JUNIOR_SILVA_API_KEY: API_KEY,
@@ -35,9 +40,10 @@ export async function startBridgeWithFakeModel(fakeModelUrl, overrides = {}) {
 		PI_CODING_AGENT_DIR: agentDir,
 		PI_PROVIDER: "anthropic",
 		PI_MODEL: TEST_MODEL,
+		...(throughProxy ? { ANTHROPIC_API_KEY: PROXY_REAL_KEY, JS_MODEL_UPSTREAM: fakeModelUrl } : {}),
 		...overrides,
 	};
-	delete environment.ANTHROPIC_API_KEY;
+	if (!throughProxy) delete environment.ANTHROPIC_API_KEY;
 	delete environment.PI_THINKING;
 	const child = spawn(process.execPath, [serverPath], { env: environment, stdio: ["ignore", "pipe", "pipe"] });
 	const bridge = { port, root, child, log: "" };

@@ -63,13 +63,17 @@ export async function startFakeModel({ host = "127.0.0.1", port = 0 } = {}) {
 	const server = createServer(async (req, res) => {
 		const chunks = [];
 		for await (const chunk of req) chunks.push(chunk);
+		const raw = Buffer.concat(chunks).toString("utf8");
 		let body;
 		try {
-			body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+			body = JSON.parse(raw);
 		} catch {
 			body = undefined;
 		}
-		requests.push({ method: req.method, path: req.url, headers: { ...req.headers }, body });
+		const record = { method: req.method, path: req.url, headers: { ...req.headers }, body, raw, closedEarly: false };
+		requests.push(record);
+		// The caller hung up before the answer was finished, for example after a Stop.
+		res.on("close", () => { if (!res.writableEnded) record.closedEarly = true; });
 		if (req.method !== "POST" || new URL(req.url || "/", "http://fake-model.invalid").pathname !== "/v1/messages" || !body) {
 			return sendJson(res, 404, { type: "error", error: { type: "not_found_error", message: "Not found" } });
 		}
