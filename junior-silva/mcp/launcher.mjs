@@ -22,5 +22,11 @@ async function forward(message) {
 function send(value) { process.stdout.write(`${JSON.stringify(value)}\n`); }
 lines.on("line", (line) => {
 	if (!line.trim()) return;
-	try { void forward(JSON.parse(line)).then((value) => { if (value) send(value); }).catch(() => send({ jsonrpc: "2.0", id: null, error: { code: -32000, message: "The local legal-tool gateway is unavailable." } })); } catch { send({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Invalid MCP request." } }); }
+	let message;
+	try { message = JSON.parse(line); } catch { return send({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Invalid MCP request." } }); }
+	// The error must carry the call's own ID. Pi can't match one without it, and would wait for its
+	// 20-minute tool timeout. A notification expects no reply at all.
+	void forward(message).then((value) => { if (value) send(value); }).catch(() => {
+		if (message.id !== undefined) send({ jsonrpc: "2.0", id: message.id, error: { code: -32000, message: "The local legal-tool gateway is unavailable." } });
+	});
 });

@@ -263,7 +263,7 @@ docker compose ps junior-silva-v2
 curl http://127.0.0.1:8132/health
 ~~~
 
-The container listens on 8126; Compose publishes it as 127.0.0.1:8132. The optional interactive container is started with:
+The container listens on 8126; Compose publishes it as 127.0.0.1:8132. Pi's tool calls use port 8127 inside the container, which is never published. The optional interactive container is started with:
 
 ~~~bash
 docker compose --profile cli run --rm junior-silva-cli

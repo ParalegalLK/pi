@@ -9,6 +9,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { currentChat, runInChat } from "../core/chat-scope.mjs";
 import { dispatchMcpRequest } from "../mcp/server.mjs";
+import { GATEWAY_PORT } from "../server/gateway.mjs";
 import { chatForRunToken, createRunToken, revokeRunToken } from "../server/run-tokens.mjs";
 
 process.env.JUNIOR_SILVA_API_KEY ||= "test-junior-silva-key";
@@ -79,26 +80,38 @@ test("the native setting gives a marked native chat, and a real chat wins over i
 });
 
 test("a run token gives back its own chat until it's revoked", () => {
-	const tokenA = createRunToken(CHAT_A, MINUTE);
-	const tokenB = createRunToken(CHAT_B, MINUTE);
+	const tokenA = createRunToken(CHAT_A, MINUTE, "127.0.0.1");
+	const tokenB = createRunToken(CHAT_B, MINUTE, "127.0.0.1");
 	assert.match(tokenA, /^[a-f0-9]{64}$/);
 	assert.notEqual(tokenA, tokenB);
-	assert.equal(chatForRunToken(tokenA), CHAT_A);
-	assert.equal(chatForRunToken(tokenB), CHAT_B);
+	assert.equal(chatForRunToken(tokenA, "127.0.0.1"), CHAT_A);
+	assert.equal(chatForRunToken(tokenB, "::ffff:127.0.0.1"), CHAT_B, "the same address written the IPv6 way");
 	revokeRunToken(tokenA);
-	assert.equal(chatForRunToken(tokenA), undefined);
-	assert.equal(chatForRunToken(tokenB), CHAT_B);
+	assert.equal(chatForRunToken(tokenA, "127.0.0.1"), undefined);
+	assert.equal(chatForRunToken(tokenB, "127.0.0.1"), CHAT_B);
 	revokeRunToken(tokenB);
 });
 
-test("unknown, empty and expired run tokens give no chat", () => {
-	for (const token of ["", undefined, "not-a-real-token", "a".repeat(64)]) assert.equal(chatForRunToken(token), undefined);
-	assert.equal(chatForRunToken(createRunToken(CHAT_A, 0)), undefined);
+test("a run token gives no chat from another address, or when it has no address", () => {
+	const token = createRunToken(CHAT_A, MINUTE, "10.89.1.3");
+	assert.equal(chatForRunToken(token, "10.89.1.3"), CHAT_A);
+	for (const address of ["10.89.2.3", "127.0.0.1", "", undefined]) assert.equal(chatForRunToken(token, address), undefined, String(address));
+	const noAddress = createRunToken(CHAT_A, MINUTE);
+	for (const address of ["", undefined, "127.0.0.1"]) assert.equal(chatForRunToken(noAddress, address), undefined, String(address));
+	revokeRunToken(token);
+	revokeRunToken(noAddress);
 });
 
-test("Pi gets the run token in its environment", () => {
+test("unknown, empty and expired run tokens give no chat", () => {
+	for (const token of ["", undefined, "not-a-real-token", "a".repeat(64)]) assert.equal(chatForRunToken(token, "127.0.0.1"), undefined);
+	assert.equal(chatForRunToken(createRunToken(CHAT_A, 0, "127.0.0.1"), "127.0.0.1"), undefined);
+});
+
+test("Pi gets the run token and the gateway's address in its environment", () => {
 	const folders = { uploads: "/a/uploads", sessions: "/a/sessions" };
-	assert.equal(agentEnvironment(folders, "/a/workspace/requests/r1", "run-token-value").JS_RUN_TOKEN, "run-token-value");
+	const environment = agentEnvironment(folders, "/a/workspace/requests/r1", "run-token-value");
+	assert.equal(environment.JS_RUN_TOKEN, "run-token-value");
+	assert.equal(environment.JUNIOR_SILVA_MCP_GATEWAY_URL, `http://127.0.0.1:${GATEWAY_PORT}/internal/mcp`);
 });
 
 test("a tool call with no chat is refused", async (t) => {
@@ -162,6 +175,57 @@ test("the launcher sends no header when it has no run token", async (t) => {
 	assert.deepEqual(await launcherHeaders(t, ""), [undefined]);
 });
 
+// Returns every reply the launcher gives within a short wait after its first one.
+async function launcherReplies(t, gatewayUrl, messages) {
+	const child = spawn(process.execPath, [launcherPath], { env: { ...process.env, JUNIOR_SILVA_MCP_GATEWAY_URL: gatewayUrl, JS_RUN_TOKEN: "launcher-test-token" }, stdio: ["pipe", "pipe", "ignore"] });
+	t.after(() => child.kill("SIGKILL"));
+	const replies = [];
+	let buffer = "";
+	child.stdout.setEncoding("utf8");
+	child.stdout.on("data", (chunk) => {
+		buffer += chunk;
+		for (let end = buffer.indexOf("\n"); end >= 0; end = buffer.indexOf("\n")) {
+			replies.push(JSON.parse(buffer.slice(0, end)));
+			buffer = buffer.slice(end + 1);
+		}
+	});
+	for (const message of messages) child.stdin.write(`${JSON.stringify(message)}\n`);
+	const deadline = Date.now() + 10_000;
+	while (!replies.length && Date.now() < deadline) await delay(20);
+	await delay(300);
+	return replies;
+}
+
+test("when the gateway refuses a call, the launcher's error carries the call's ID", async (t) => {
+	const gateway = createServer((req, res) => {
+		req.resume();
+		req.on("end", () => {
+			res.writeHead(429, { "Content-Type": "application/json" });
+			res.end("{}");
+		});
+	});
+	await new Promise((resolve) => gateway.listen(0, "127.0.0.1", resolve));
+	t.after(() => gateway.close());
+	const replies = await launcherReplies(t, `http://127.0.0.1:${gateway.address().port}/internal/mcp`, [
+		{ jsonrpc: "2.0", method: "notifications/initialized" },
+		{ jsonrpc: "2.0", id: 7, method: "tools/list" },
+	]);
+	assert.equal(replies.length, 1, "the notification must get no reply");
+	assert.equal(replies[0].id, 7);
+	assert.equal(replies[0].error.code, -32000);
+});
+
+test("when the gateway is down, the launcher's error carries the call's ID", async (t) => {
+	const closed = createServer();
+	await new Promise((resolve) => closed.listen(0, "127.0.0.1", resolve));
+	const { port } = closed.address();
+	await new Promise((resolve) => closed.close(resolve));
+	const replies = await launcherReplies(t, `http://127.0.0.1:${port}/internal/mcp`, [{ jsonrpc: "2.0", id: "call-9", method: "tools/call", params: { name: "legal_validate_draft", arguments: {} } }]);
+	assert.equal(replies.length, 1);
+	assert.equal(replies[0].id, "call-9");
+	assert.equal(replies[0].error.code, -32000);
+});
+
 async function startServer(t, overrides = {}) {
 	const root = await mkdtemp(path.join(os.tmpdir(), "junior-silva-chat-context-"));
 	t.after(() => rm(root, { recursive: true, force: true }));
@@ -186,7 +250,7 @@ async function startServer(t, overrides = {}) {
 	return { child, port };
 }
 
-test("the tool route refuses a call with no valid run token", async (t) => {
+test("the tool route is on the gateway port, and refuses a call with no valid run token", async (t) => {
 	const { child, port } = await startServer(t);
 	await new Promise((resolve, reject) => {
 		const timer = setTimeout(() => reject(new Error("The server did not start in time")), 15_000);
@@ -201,14 +265,16 @@ test("the tool route refuses a call with no valid run token", async (t) => {
 			reject(new Error(`The server exited early with code ${code}`));
 		});
 	});
-	const post = (headers) => fetch(`http://127.0.0.1:${port}/internal/mcp`, {
+	const post = (target, headers) => fetch(`http://127.0.0.1:${target}/internal/mcp`, {
 		method: "POST",
 		headers: { "Content-Type": "application/json", ...headers },
 		body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
 	});
-	assert.equal((await post({})).status, 401);
-	assert.equal((await post({ Authorization: `Bearer ${"a".repeat(64)}` })).status, 401);
-	assert.equal((await post({ Authorization: "Bearer test-junior-silva-key" })).status, 401, "the LibreChat key isn't a run token");
+	const gateway = port + 1;
+	assert.equal((await post(gateway, {})).status, 401);
+	assert.equal((await post(gateway, { Authorization: `Bearer ${"a".repeat(64)}` })).status, 401);
+	assert.equal((await post(gateway, { Authorization: "Bearer test-junior-silva-key" })).status, 401, "the LibreChat key isn't a run token");
+	assert.equal((await post(port, { Authorization: "Bearer test-junior-silva-key" })).status, 404, "the old route on the public port is gone");
 });
 
 test("the bridge refuses to start with the native setting", async (t) => {

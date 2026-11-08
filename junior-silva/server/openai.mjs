@@ -10,8 +10,8 @@ import { createChatFolders, resolveChatScope, runInChat } from "../core/chat-sco
 import { artifactsRoot, env, projectRoot, requiredEnv } from "../core/environment.mjs";
 import { mimeType, publishWorkspaceArtifact, resolveArtifactRequest, safeFilename } from "../core/files.mjs";
 import { newestRequestedArtifact, requestedSlideCount } from "../core/artifact-delivery.mjs";
-import { dispatchMcpRequest } from "../mcp/server.mjs";
-import { chatForRunToken, createRunToken, revokeRunToken } from "./run-tokens.mjs";
+import { arrivedOnPiNetwork, GATEWAY_PORT, startGateway } from "./gateway.mjs";
+import { bearerToken, createRunToken, revokeRunToken } from "./run-tokens.mjs";
 import { addAssistantUsage, createUsageTotals, openAiUsage, requestsStreamUsage } from "./usage.mjs";
 
 const PORT = Number(env("JUNIOR_SILVA_PORT", "8126"));
@@ -24,15 +24,13 @@ const AGENT_ROOT = path.resolve(env("PI_CODING_AGENT_DIR", path.join(path.dirnam
 const PI_CLI = path.join(projectRoot, "packages", "coding-agent", "dist", "bundle", "cli.js");
 const ATTACHMENT_ORIGINS = new Set(env("JUNIOR_SILVA_ATTACHMENT_ORIGINS").split(",").map((item) => item.trim()).filter(Boolean));
 const auditRoot = path.join(path.dirname(artifactsRoot), "audit");
+// Pi runs inside this container until P3 gives each run its own address.
+const LOCAL_PI_ADDRESS = "127.0.0.1";
 
 function json(res, status, value) {
 	const body = JSON.stringify(value);
 	res.writeHead(status, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) });
 	res.end(body);
-}
-
-function bearerToken(req) {
-	return String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
 }
 
 function authorized(req) {
@@ -410,7 +408,7 @@ function agentEnvironment(folders, requestWorkspace, runToken) {
 		PI_CODING_AGENT_SESSION_DIR: folders.sessions,
 		PI_CODING_AGENT_DIR: AGENT_ROOT,
 		PI_SKIP_VERSION_CHECK: "1",
-		JUNIOR_SILVA_MCP_GATEWAY_URL: `http://127.0.0.1:${PORT}/internal/mcp`,
+		JUNIOR_SILVA_MCP_GATEWAY_URL: `http://${LOCAL_PI_ADDRESS}:${GATEWAY_PORT}/internal/mcp`,
 		JS_RUN_TOKEN: runToken,
 		JUNIOR_SILVA_DATA_ROOT: path.dirname(artifactsRoot),
 		JUNIOR_SILVA_ARTIFACT_ROOT: folders.artifacts,
@@ -421,10 +419,6 @@ function agentEnvironment(folders, requestWorkspace, runToken) {
 	if (provider === "anthropic" && process.env.ANTHROPIC_API_KEY) output.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 	if (provider === "google" && process.env.GEMINI_API_KEY) output.GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 	return output;
-}
-
-function loopback(req) {
-	return ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(String(req.socket.remoteAddress || ""));
 }
 
 async function audit(sessionId, event) {
@@ -511,7 +505,7 @@ async function runPi(prompt, sessionId, onProgress, chat, requestWorkspace, sign
 	const startedAt = Date.now();
 	const thoughtController = createThoughtController(onProgress);
 	const timeoutMs = Number(env("JUNIOR_SILVA_PI_TIMEOUT_MS", "1200000"));
-	const runToken = createRunToken(chat, timeoutMs);
+	const runToken = createRunToken(chat, timeoutMs, LOCAL_PI_ADDRESS);
 	return new Promise((resolve, reject) => {
 		// A message whose connection closed while it waited in the queue never starts Pi.
 		signal.throwIfAborted();
@@ -747,19 +741,12 @@ const server = createServer(async (req, res) => {
 		stop.abort();
 	});
 	try {
+		// In P3 Pi shares a network with the bridge, so it could reach this port. Its door is the gateway.
+		if (arrivedOnPiNetwork(req.socket.localAddress)) return json(res, 403, { error: "Not allowed" });
 		const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
 		if (req.method === "GET" && url.pathname === "/health") return json(res, 200, { status: "ok", service: MODEL, pi: "1.0.0" });
 		if (req.method === "GET" && url.pathname === "/ready") return json(res, 200, { ready: existsSync(PI_CLI), mcp: existsSync(path.join(projectRoot, ".pi", "mcp.json")) });
 		if (req.method === "GET" && url.pathname.startsWith("/files/")) return await serveArtifact(res, url.pathname, url.searchParams.get("exp"));
-		if (req.method === "POST" && url.pathname === "/internal/mcp") {
-			if (!loopback(req)) return json(res, 403, { error: "Local gateway only" });
-			const chat = chatForRunToken(bearerToken(req));
-			if (!chat) return json(res, 401, { error: "A valid run token is required" });
-			const message = await requestBody(req);
-			const response = await runInChat(chat, () => dispatchMcpRequest(message));
-			if (!response) return json(res, 202, {});
-			return json(res, 200, response);
-		}
 		if (url.pathname.startsWith("/v1/") && !authorized(req)) return json(res, 401, { error: { message: "Unauthorized", type: "authentication_error" } });
 		if (req.method === "GET" && url.pathname === "/v1/models") return json(res, 200, { object: "list", data: [{ id: MODEL, object: "model", created: 0, owned_by: "paralegal.lk" }] });
 		if (req.method === "POST" && url.pathname === "/v1/chat/completions") {
@@ -800,6 +787,8 @@ const server = createServer(async (req, res) => {
 	}
 });
 
+// The gateway starts first, so "listening" means Pi's tool calls can be served too.
+await startGateway();
 server.listen(PORT, HOST, () => console.log(`[junior-silva-v2] listening on ${HOST}:${PORT}`));
 }
 
