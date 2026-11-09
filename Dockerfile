@@ -89,12 +89,18 @@ COPY .pi/extensions/junior-silva-legal-context.ts .pi/extensions/junior-silva-sc
      .pi/extensions/legal-research-citation-delivery.ts .pi/extensions/librechat-preview-delivery.ts ./.pi/extensions/
 COPY junior-silva/core/legal-scope.mjs ./junior-silva/core/legal-scope.mjs
 COPY .agents/skills ./.agents/skills
+# The start-up script checks the runner's settings, fills Pi's settings folder (/run/pi-agent, in
+# memory), makes this message's folder, then starts Pi.
+COPY deploy/pi-entrypoint.sh ./deploy/pi-entrypoint.sh
+COPY deploy/pi-agent-seed ./deploy/pi-agent-seed
 ENV NODE_ENV=production \
+    LANG=C.UTF-8 \
+    TZ=Asia/Colombo \
     PI_OFFLINE=1 \
     PI_TELEMETRY=0 \
     PI_SKIP_VERSION_CHECK=1
 USER node
-ENTRYPOINT ["node", "/app/packages/coding-agent/dist/bundle/cli.js"]
+ENTRYPOINT ["/app/deploy/pi-entrypoint.sh"]
 
 # Stage 3: the bridge image. Keep it last: `docker compose build` builds the last stage.
 FROM build AS bridge
