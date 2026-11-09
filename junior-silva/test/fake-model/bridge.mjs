@@ -36,6 +36,9 @@ export async function startBridgeWithFakeModel(fakeModelUrl, { environment: over
 		PI_CODING_AGENT_DIR: agentDir,
 		PI_PROVIDER: "anthropic",
 		PI_MODEL: TEST_MODEL,
+		// Pi as a process here, as before P3. container-runs.test.mjs tests the container way.
+		JS_PI_EXECUTOR: "local",
+		JS_ALLOW_LOCAL_PI: "1",
 		ANTHROPIC_API_KEY: PROXY_REAL_KEY,
 		JS_MODEL_UPSTREAM: fakeModelUrl,
 		...overrides,

@@ -112,7 +112,8 @@ pi/
 │   │   ├── server.mjs                       the runner: starts and stops Pi containers for the bridge
 │   │   └── slots.mjs                        the slot networks, and keeping the bridge connected to them
 │   ├── server/
-│   │   └── openai.mjs                       OpenAI bridge, HMAC conversation sessions, upload manifest/deduplication and SSE progress
+│   │   ├── openai.mjs                       OpenAI bridge, HMAC conversation sessions, upload manifest/deduplication and SSE progress
+│   │   └── pi-executor.mjs                  starts each message's Pi: in its own container through the runner, or locally for development
 │   ├── services/
 │   │   ├── drafter.mjs                      legacy adapter retained temporarily; not exposed by production MCP
 │   │   ├── preview.mjs                      presentation adapter around core/previews

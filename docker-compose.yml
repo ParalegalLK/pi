@@ -23,6 +23,10 @@ services:
       TRANSLATOR_BASE_URL: ${TRANSLATOR_BASE_URL:-https://www.devtranslate.paralegal.lk/api}
 
       JUNIOR_SILVA_KB_ROOT: /kb
+      # Pi still runs inside this container until P3.8 adds the runner service. This way is for
+      # development only, so it has to be allowed on purpose.
+      JS_PI_EXECUTOR: local
+      JS_ALLOW_LOCAL_PI: "1"
     ports:
       - "127.0.0.1:8132:8126"
     volumes:

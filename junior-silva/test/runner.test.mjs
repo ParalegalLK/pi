@@ -216,6 +216,50 @@ test("when the bridge hangs up, the runner kills the container and frees the slo
 	assert.equal((await send(runner, "POST", "/runs", { body: runBody() })).status, 200, "the slot must be free again");
 });
 
+test("the bridge's Stop kills the container, and the run's own answer then ends with the reason stopped", async (t) => {
+	const runner = await startRunner(t);
+	const body = runBody({ prompt: "slow: x" });
+	const running = send(runner, "POST", "/runs", { body });
+	assert.ok(await until(async () => (await calls(runner, "run")).length === 1));
+	const stop = await send(runner, "POST", `/runs/${body.requestId}/stop`);
+	assert.equal(stop.status, 202);
+	const result = await running;
+	assert.equal(result.body.toString(), "started\n");
+	assert.deepEqual(result.trailers, { "x-run-exit": "137", "x-run-reason": "stopped" });
+	assert.ok((await calls(runner, "kill")).some((call) => call.args[0] === `js-run-${body.requestId}`), "docker kill wasn't called");
+	assert.match(runner.output(), new RegExp(`run ${body.requestId}: the bridge asked to stop it`));
+	assert.equal((await send(runner, "POST", "/runs", { body: runBody() })).status, 200, "the slot must be free again");
+});
+
+test("Stop needs the secret, and a run that isn't running gets 404", async (t) => {
+	const runner = await startRunner(t);
+	const body = runBody({ prompt: "slow: x" });
+	void send(runner, "POST", "/runs", { body });
+	assert.ok(await until(async () => (await calls(runner, "run")).length === 1));
+	for (const secret of [null, "a-wrong-secret-that-is-long-enough-0123456789"]) assert.equal((await send(runner, "POST", `/runs/${body.requestId}/stop`, { secret })).status, 401);
+	assert.equal((await send(runner, "POST", `/runs/chatcmpl-${randomUUID()}/stop`)).status, 404);
+	assert.equal((await send(runner, "POST", "/runs/not-a-request-id/stop")).status, 404);
+	assert.equal((await send(runner, "GET", `/runs/${body.requestId}/stop`)).status, 404);
+	assert.deepEqual(await calls(runner, "kill"), [], "a refused Stop must not kill anything");
+});
+
+test("Stop for a run whose container isn't starting yet gets 404, and hanging up then cancels it", async (t) => {
+	const runner = await startRunner(t, { JS_START_GAP_MS: "1500" });
+	void send(runner, "POST", "/runs", { body: runBody({ slot: 1, prompt: "slow: x" }) });
+	assert.ok(await until(async () => (await calls(runner, "run")).length === 1));
+	// The second run waits for its start turn.
+	const waiting = runBody({ slot: 2, userHash: USER_B });
+	const payload = Buffer.from(JSON.stringify(waiting));
+	const held = http.request(`${runner.url}/runs`, { method: "POST", headers: { authorization: `Bearer ${SECRET}`, "content-type": "application/json", "content-length": payload.length } });
+	held.on("error", () => {});
+	held.end(payload);
+	await delay(300);
+	assert.equal((await send(runner, "POST", `/runs/${waiting.requestId}/stop`)).status, 404);
+	held.destroy();
+	await delay(2_000);
+	assert.equal((await calls(runner, "run")).length, 1, "the cancelled run must never start");
+});
+
 test("a run that prints nothing in time is killed, with the reason no-start", async (t) => {
 	const runner = await startRunner(t, { JS_START_TIMEOUT_MS: "800" });
 	const result = await send(runner, "POST", "/runs", { body: runBody({ prompt: "silent: x" }) });

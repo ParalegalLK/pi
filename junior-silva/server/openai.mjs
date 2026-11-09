@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { constants, existsSync } from "node:fs";
 import { appendFile, copyFile, mkdir, mkdtemp, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
@@ -11,6 +10,7 @@ import { artifactsRoot, env, projectRoot, requiredEnv } from "../core/environmen
 import { mimeType, publishWorkspaceArtifact, resolveArtifactRequest, safeFilename } from "../core/files.mjs";
 import { newestRequestedArtifact, requestedSlideCount } from "../core/artifact-delivery.mjs";
 import { arrivedOnPiNetwork, GATEWAY_PORT, startGateway } from "./gateway.mjs";
+import { createSlotPool, piAddress, startContainerPi, startLocalPi } from "./pi-executor.mjs";
 import { bearerToken, createRunToken, revokeRunToken } from "./run-tokens.mjs";
 import { addAssistantUsage, createUsageTotals, openAiUsage, requestsStreamUsage } from "./usage.mjs";
 
@@ -24,7 +24,18 @@ const AGENT_ROOT = path.resolve(env("PI_CODING_AGENT_DIR", path.join(path.dirnam
 const PI_CLI = path.join(projectRoot, "packages", "coding-agent", "dist", "bundle", "cli.js");
 const ATTACHMENT_ORIGINS = new Set(env("JUNIOR_SILVA_ATTACHMENT_ORIGINS").split(",").map((item) => item.trim()).filter(Boolean));
 const auditRoot = path.join(path.dirname(artifactsRoot), "audit");
-// Pi runs inside this container until P3 gives each run its own address.
+// How Pi starts for each message (pi-executor.mjs): "container", in its own gVisor container through
+// the runner, or "local", inside this container, for development only. The start checks are below.
+const PI_EXECUTOR = env("JS_PI_EXECUTOR", "container");
+const RUNNER_URL = env("JS_RUNNER_URL");
+const RUNNER_SECRET = env("JS_RUNNER_SECRET");
+// The same number of slots as the runner has.
+const SLOT_COUNT = Number(env("JS_SLOTS", "3"));
+// How long a message waits for a free slot before it gets the busy answer.
+const SLOT_WAIT_MS = Number(env("JS_SLOT_WAIT_MS", "300000"));
+// Made once the settings above are checked.
+let slotPool;
+// In the local way, Pi runs inside this container.
 const LOCAL_PI_ADDRESS = "127.0.0.1";
 // Each run gets its own settings folder in here, removed when the run ends.
 const RUNS_ROOT = path.join(path.dirname(artifactsRoot), "pi-runs");
@@ -502,7 +513,6 @@ async function appendedSessionUsage(directory, sizesBefore) {
 	return changedFiles === 1 ? totals : undefined;
 }
 
-const STOP_GRACE_MS = 5_000;
 const NOT_COMPLETE_NOTE = "**This answer isn't complete.** The AI service stopped before it finished, so please don't rely on the text below. Send your message again to retry, and contact the administrator if this keeps happening.";
 const CUT_OFF_NOTE = "**This answer was cut off** because it reached the length limit, so it's incomplete. You can ask me to continue.";
 const NO_ANSWER_NOTE = "**I couldn't finish this answer.** The AI service stopped before it wrote anything. Send your message again to retry, and contact the administrator if this keeps happening.";
@@ -518,7 +528,7 @@ function finishedAnswer(text, stopReason) {
 	return `${NOT_COMPLETE_NOTE}\n\n---\n\n${answer}`;
 }
 
-async function runPi(prompt, sessionId, onProgress, chat, requestWorkspace, signal) {
+function localPiArgs(sessionId) {
 	// Hosted Pi uses administrator-owned legal MCP registration. Its normal built-in
 	// tools remain subject to the legal-scope extension and deployment sandbox.
 	const args = [
@@ -533,120 +543,150 @@ async function runPi(prompt, sessionId, onProgress, chat, requestWorkspace, sign
 	];
 	args.push("--provider", "anthropic", "--model", PI_MODEL);
 	if (env("PI_THINKING")) args.push("--thinking", env("PI_THINKING"));
+	return args;
+}
+
+// Starts Pi for one run: through the runner on a free slot (the container way, the default), or as a
+// process here (the local way, development only). The run token is tied to the address Pi calls from.
+// Whatever has to be undone when the run ends is added to cleanUps.
+async function startPi({ requestId, requestWorkspace, sessionId, chat, prompt, timeoutMs, signal, cleanUps }) {
+	if (PI_EXECUTOR === "local") {
+		// In the container way, Pi's start-up script makes this folder. Here the bridge does, as before P3.
+		await mkdir(requestWorkspace, { recursive: true });
+		const settingsFolder = await createPiSettings();
+		cleanUps.push(() => rm(settingsFolder, { recursive: true, force: true }));
+		const runToken = createRunToken(chat, timeoutMs, LOCAL_PI_ADDRESS);
+		cleanUps.push(() => revokeRunToken(runToken));
+		signal.throwIfAborted();
+		const environment = agentEnvironment(chat.folders, requestWorkspace, runToken, settingsFolder);
+		return { runToken, pi: startLocalPi({ command: process.execPath, args: localPiArgs(sessionId), cwd: projectRoot, environment, prompt }) };
+	}
+	const slot = await slotPool.take(signal);
+	cleanUps.push(() => slotPool.release(slot));
+	// The token only works from this slot's Pi container, so a stolen one is useless anywhere else.
+	const runToken = createRunToken(chat, timeoutMs, piAddress(slot));
+	cleanUps.push(() => revokeRunToken(runToken));
+	signal.throwIfAborted();
+	const thinking = env("PI_THINKING");
+	const run = { requestId, userHash: chat.userHash, chatHash: chat.chatHash, slot, runToken, model: PI_MODEL, ...(thinking ? { thinking } : {}) };
+	return { runToken, pi: startContainerPi({ runnerUrl: RUNNER_URL, runnerSecret: RUNNER_SECRET, run, prompt }) };
+}
+
+// One run of Pi. makePrompt(requestWorkspace) builds the prompt for this run's own message folder.
+async function runPiOnce({ requestId, makePrompt, sessionId, onProgress, chat, signal }) {
+	const requestWorkspace = path.join(chat.folders.workspace, "requests", requestId);
 	const sessionSizesBefore = await sessionFileSizes(chat.folders.sessions);
 	const startedAt = Date.now();
 	const thoughtController = createThoughtController(onProgress);
 	const timeoutMs = Number(env("JUNIOR_SILVA_PI_TIMEOUT_MS", "1200000"));
-	const settingsFolder = await createPiSettings();
-	const runToken = createRunToken(chat, timeoutMs, LOCAL_PI_ADDRESS);
-	return new Promise((resolve, reject) => {
+	const cleanUps = [];
+	try {
 		// A message whose connection closed while it waited in the queue never starts Pi.
 		signal.throwIfAborted();
-		const child = spawn(process.execPath, args, { cwd: projectRoot, env: agentEnvironment(chat.folders, requestWorkspace, runToken, settingsFolder), stdio: ["pipe", "pipe", "pipe"] });
-		// The prompt goes in on stdin, not on the command line: every process can read a command line,
-		// and Linux limits one command-line argument to 128 KB, too small for a long pasted contract.
-		child.stdin.on("error", () => {});
-		child.stdin.end(prompt);
-		// The service-level SSE keepalive is intentionally invisible. This bounded
-		// timer is different: it tells the user that Pi is still alive when a
-		// legitimate document or research step produces no lifecycle event.
-		const thoughtLivenessTimer = setInterval(() => thoughtController.tick(), 5_000);
-		let buffer = "";
-		let stderr = "";
-		let finalText = "";
-		let stopReason;
-		let failure;
-		let stopError;
-		let forceTimer;
-		let artifactPublished = false;
-		const usageTotals = createUsageTotals();
-		const usageResponseIds = new Set();
-		const recordAssistantUsage = (message) => {
-			if (!message?.usage) return;
-			const key = message.responseId || `${message.timestamp || ""}:${message.usage.totalTokens || ""}:${message.usage.input || ""}:${message.usage.output || ""}`;
-			if (usageResponseIds.has(key)) return;
-			usageResponseIds.add(key);
-			addAssistantUsage(usageTotals, message.usage);
-		};
-		child.stdout.on("data", (chunk) => {
-			buffer += chunk.toString();
-			const lines = buffer.split(/\r?\n/);
-			buffer = lines.pop() || "";
-			for (const line of lines) {
-				try {
-					const event = JSON.parse(line);
-					if (event.type === "message_update" && event.assistantMessageEvent?.type === "message_end") {
-						recordAssistantUsage({ ...event.assistantMessageEvent.message, usage: event.usage });
-					}
-					if (event.type === "message_end" && event.message?.role === "custom" && event.message?.customType === "junior-silva-scope" && typeof event.message?.content === "string") {
-						finalText = event.message.content;
-						stopReason = undefined;
-					}
-					thoughtController.handle(event);
-					if (event.type === "tool_execution_start") {
-						const tool = event.toolName || event.tool_name;
-						void audit(sessionId, { type: "tool", tool: safeAuditToolName(tool), status: "started" }).catch(() => {});
-					}
-					// Never relay update payloads: built-in tools can include shell output,
-					// files, URLs, source text, credentials, or internal service responses.
-					if (event.type === "tool_execution_end") {
-						const tool = event.toolName || event.tool_name;
-						if (!event.isError && /(?:^|__|\/)workbench_publish_artifact$/.test(String(tool || ""))) artifactPublished = true;
-						void audit(sessionId, { type: "tool", tool: safeAuditToolName(tool), status: event.isError ? "error" : "completed" }).catch(() => {});
-					}
-					if (event.type === "message" && event.message?.role === "assistant") recordAssistantUsage(event.message);
-					if (event.type === "message_end" && event.message?.role === "assistant") {
-						finalText = (event.message.content || []).filter((part) => part.type === "text").map((part) => part.text || "").join("\n");
-						stopReason = event.message.stopReason;
-						failure = event.message.errorMessage;
-						recordAssistantUsage(event.message);
-					}
-				} catch { }
-			}
+		const { runToken, pi } = await startPi({ requestId, requestWorkspace, sessionId, chat, prompt: makePrompt(requestWorkspace), timeoutMs, signal, cleanUps });
+		return await new Promise((resolve, reject) => {
+			// The service-level SSE keepalive is intentionally invisible. This bounded
+			// timer is different: it tells the user that Pi is still alive when a
+			// legitimate document or research step produces no lifecycle event.
+			const thoughtLivenessTimer = setInterval(() => thoughtController.tick(), 5_000);
+			let buffer = "";
+			let finalText = "";
+			let stopReason;
+			let failure;
+			let stopError;
+			let artifactPublished = false;
+			const usageTotals = createUsageTotals();
+			const usageResponseIds = new Set();
+			const recordAssistantUsage = (message) => {
+				if (!message?.usage) return;
+				const key = message.responseId || `${message.timestamp || ""}:${message.usage.totalTokens || ""}:${message.usage.input || ""}:${message.usage.output || ""}`;
+				if (usageResponseIds.has(key)) return;
+				usageResponseIds.add(key);
+				addAssistantUsage(usageTotals, message.usage);
+			};
+			pi.stdout.on("data", (chunk) => {
+				buffer += chunk.toString();
+				const lines = buffer.split(/\r?\n/);
+				buffer = lines.pop() || "";
+				for (const line of lines) {
+					try {
+						const event = JSON.parse(line);
+						if (event.type === "message_update" && event.assistantMessageEvent?.type === "message_end") {
+							recordAssistantUsage({ ...event.assistantMessageEvent.message, usage: event.usage });
+						}
+						if (event.type === "message_end" && event.message?.role === "custom" && event.message?.customType === "junior-silva-scope" && typeof event.message?.content === "string") {
+							finalText = event.message.content;
+							stopReason = undefined;
+						}
+						thoughtController.handle(event);
+						if (event.type === "tool_execution_start") {
+							const tool = event.toolName || event.tool_name;
+							void audit(sessionId, { type: "tool", tool: safeAuditToolName(tool), status: "started" }).catch(() => {});
+						}
+						// Never relay update payloads: built-in tools can include shell output,
+						// files, URLs, source text, credentials, or internal service responses.
+						if (event.type === "tool_execution_end") {
+							const tool = event.toolName || event.tool_name;
+							if (!event.isError && /(?:^|__|\/)workbench_publish_artifact$/.test(String(tool || ""))) artifactPublished = true;
+							void audit(sessionId, { type: "tool", tool: safeAuditToolName(tool), status: event.isError ? "error" : "completed" }).catch(() => {});
+						}
+						if (event.type === "message" && event.message?.role === "assistant") recordAssistantUsage(event.message);
+						if (event.type === "message_end" && event.message?.role === "assistant") {
+							finalText = (event.message.content || []).filter((part) => part.type === "text").map((part) => part.text || "").join("\n");
+							stopReason = event.message.stopReason;
+							failure = event.message.errorMessage;
+							recordAssistantUsage(event.message);
+						}
+					} catch { }
+				}
+			});
+			const stopPi = (error) => {
+				if (stopError) return;
+				stopError = error;
+				revokeRunToken(runToken);
+				pi.stop();
+			};
+			const onStop = () => {
+				console.log(`[junior-silva-v2] Stopping the run for chat ${chat.chatHash}, because its connection closed.`);
+				stopPi(new Error("The run was stopped"));
+			};
+			const timeout = setTimeout(() => stopPi(new Error("Pi request timed out")), timeoutMs);
+			const cleanUp = () => {
+				clearTimeout(timeout);
+				clearInterval(thoughtLivenessTimer);
+				signal.removeEventListener("abort", onStop);
+			};
+			signal.addEventListener("abort", onStop, { once: true });
+			if (signal.aborted) onStop();
+			// Settling only here means the next message in this chat can't start while this Pi is still running.
+			void pi.done.then((ending) => {
+				cleanUp();
+				if (stopError) return reject(stopError);
+				if (ending.reason === "no-start") return resolve({ noStart: true });
+				if (ending.exitCode !== 0) return reject(new Error(`Pi exited with code ${ending.exitCode ?? "unknown"} (${ending.reason})${ending.detail ? `: ${ending.detail}` : ""}`));
+				const answer = finishedAnswer(finalText, stopReason);
+				if (!answer) return reject(new Error("Pi returned no final answer"));
+				if (stopReason !== undefined && stopReason !== "stop") console.error(`[junior-silva-v2] Pi's run for chat ${chat.chatHash} ended early: ${`${stopReason}: ${failure || "no details"}`.replace(/\s+/g, " ").slice(0, 320)}`);
+				void appendedSessionUsage(chat.folders.sessions, sessionSizesBefore).then((persistedUsage) => {
+					resolve({ answer, usage: openAiUsage(persistedUsage) || openAiUsage(usageTotals), elapsedMs: Date.now() - startedAt, artifactPublished, requestWorkspace });
+				}).catch(reject);
+			});
 		});
-		child.stderr.on("data", (chunk) => { stderr = `${stderr}${chunk.toString()}`.slice(-12_000); });
-		// Asks Pi to stop, which also stops the commands it started, then forces it. A process Pi
-		// left behind can hold its pipes open, so they're closed too, or "close" might never fire.
-		const stopPi = (error) => {
-			if (stopError) return;
-			stopError = error;
-			revokeRunToken(runToken);
-			child.kill("SIGTERM");
-			forceTimer = setTimeout(() => {
-				child.kill("SIGKILL");
-				child.stdout.destroy();
-				child.stderr.destroy();
-			}, STOP_GRACE_MS);
-		};
-		const onStop = () => {
-			console.log(`[junior-silva-v2] Stopping the run for chat ${chat.chatHash}, because its connection closed.`);
-			stopPi(new Error("The run was stopped"));
-		};
-		const timeout = setTimeout(() => stopPi(new Error("Pi request timed out")), timeoutMs);
-		const cleanUp = () => {
-			clearTimeout(timeout);
-			clearTimeout(forceTimer);
-			clearInterval(thoughtLivenessTimer);
-			signal.removeEventListener("abort", onStop);
-		};
-		signal.addEventListener("abort", onStop, { once: true });
-		child.on("error", (error) => { cleanUp(); reject(error); });
-		// Settling only here means the next message in this chat can't start while this Pi is still running.
-		child.on("close", (code) => {
-			cleanUp();
-			if (stopError) return reject(stopError);
-			if (code !== 0) return reject(new Error(`Pi exited with code ${code}: ${stderr.replace(/\s+/g, " ").slice(0, 1200)}`));
-			const answer = finishedAnswer(finalText, stopReason);
-			if (!answer) return reject(new Error("Pi returned no final answer"));
-			if (stopReason !== undefined && stopReason !== "stop") console.error(`[junior-silva-v2] Pi's run for chat ${chat.chatHash} ended early: ${`${stopReason}: ${failure || "no details"}`.replace(/\s+/g, " ").slice(0, 320)}`);
-			void appendedSessionUsage(chat.folders.sessions, sessionSizesBefore).then((persistedUsage) => {
-				resolve({ answer, usage: openAiUsage(persistedUsage) || openAiUsage(usageTotals), elapsedMs: Date.now() - startedAt, artifactPublished });
-			}).catch(reject);
-		});
-	}).finally(async () => {
-		revokeRunToken(runToken);
-		await rm(settingsFolder, { recursive: true, force: true });
-	});
+	} finally {
+		for (const cleanUp of cleanUps.reverse()) await cleanUp();
+	}
+}
+
+// Runs Pi for a message. In the container way, a Pi that printed nothing in time gets one more try,
+// with a new message folder, because the first try may already have made its folder (P3.2 refuses
+// to reuse one).
+async function runPi(options) {
+	const first = await runPiOnce(options);
+	if (!first.noStart) return first;
+	console.error(`[junior-silva-v2] Pi didn't start in time for chat ${options.chat.chatHash}, so it gets one more try.`);
+	const second = await runPiOnce({ ...options, requestId: `chatcmpl-${randomUUID()}` });
+	if (second.noStart) throw new Error("Pi didn't start in time, twice");
+	return second;
 }
 
 function artifactDeliveryText(publication) {
@@ -670,23 +710,26 @@ async function publishRecoveredArtifact(candidate, instruction) {
 	return publication;
 }
 
-async function recoverUndeliveredArtifact({ instruction, chat, requestWorkspace, sessionId, initial, onProgress, signal }) {
+async function recoverUndeliveredArtifact({ instruction, chat, sessionId, initial, onProgress, signal }) {
 	if (initial.artifactPublished) return initial;
+	// The folder of the run that answered, which a retry may have changed.
+	const { requestWorkspace } = initial;
 	let candidate = await newestRequestedArtifact(requestWorkspace, instruction);
 	if (!candidate) return initial;
 
 	// Give Pi one bounded opportunity to finish its own validation/repair and call
-	// the normal publishing tool. It stays inside the request workspace and does
-	// not repeat research simply because delivery was omitted.
+	// the normal publishing tool. It does not repeat research simply because
+	// delivery was omitted. The repair run has its own message ID and folder, since
+	// Pi's start-up script never reuses one, so the file is corrected where it is.
 	onProgress("Checking the generated file before delivery…");
-	const repair = await runPi(
-		`A requested deliverable exists in this request workspace but has not been delivered. Inspect only ${candidate}. If it needs correction, correct and validate it. Then call workbench_publish_artifact for the final file and finish with a concise delivery confirmation. Do not repeat legal research or return an internal progress note.`,
+	const repair = await runPi({
+		requestId: `chatcmpl-${randomUUID()}`,
+		makePrompt: () => `A requested deliverable from your previous answer has not been delivered. Inspect only ${candidate}. If it needs correction, correct and validate it in place. Then call workbench_publish_artifact for the final file and finish with a concise delivery confirmation. Do not repeat legal research or return an internal progress note.`,
 		sessionId,
 		onProgress,
 		chat,
-		requestWorkspace,
 		signal,
-	).catch(() => undefined);
+	}).catch(() => undefined);
 	if (repair?.artifactPublished) return repair;
 	if (signal.aborted) return initial;
 
@@ -759,6 +802,15 @@ if (env("JS_NATIVE_DEV")) throw new Error("JS_NATIVE_DEV is only for the native 
 if (env("PI_PROVIDER", "anthropic") !== "anthropic") throw new Error("PI_PROVIDER must be anthropic. Pi's model calls go through the bridge's model proxy, which has no route for other providers yet.");
 requiredEnv("PI_MODEL");
 requiredEnv("ANTHROPIC_API_KEY");
+if (PI_EXECUTOR !== "container" && PI_EXECUTOR !== "local") throw new Error("JS_PI_EXECUTOR must be container or local.");
+if (PI_EXECUTOR === "local" && env("JS_ALLOW_LOCAL_PI") !== "1") throw new Error("JS_PI_EXECUTOR=local runs Pi inside the bridge, next to its keys and every chat's files, so it's for development only. Set JS_ALLOW_LOCAL_PI=1 to use it anyway.");
+if (PI_EXECUTOR === "container") {
+	if (!/^http:\/\/[A-Za-z0-9.-]+(?::\d{1,5})?\/?$/.test(RUNNER_URL)) throw new Error("JS_RUNNER_URL must be the runner's http address, such as http://junior-silva-runner:8128.");
+	if (RUNNER_SECRET.length < 32) throw new Error("JS_RUNNER_SECRET must be set, with at least 32 characters.");
+	if (!Number.isInteger(SLOT_COUNT) || SLOT_COUNT < 1 || SLOT_COUNT > 254) throw new Error("JS_SLOTS must be a whole number from 1 to 254, the same as the runner's.");
+	if (!Number.isInteger(SLOT_WAIT_MS) || SLOT_WAIT_MS < 0) throw new Error("JS_SLOT_WAIT_MS must be a whole number of milliseconds.");
+	slotPool = createSlotPool(SLOT_COUNT, SLOT_WAIT_MS);
+}
 // One user's failed request must not end the process serving every other user.
 process.on("unhandledRejection", (reason) => console.error(`[junior-silva-v2] Unhandled rejection: ${reason?.stack || reason}`));
 await Promise.all([mkdir(AGENT_ROOT, { recursive: true }), mkdir(auditRoot, { recursive: true })]);
@@ -795,13 +847,12 @@ const server = createServer(async (req, res) => {
 			const id = `chatcmpl-${randomUUID()}`;
 			const streaming = body.stream !== false;
 			const includeStreamUsage = requestsStreamUsage(body);
-			const requestWorkspace = path.join(chat.folders.workspace, "requests", id);
-			await mkdir(requestWorkspace, { recursive: true });
 			if (streaming) { startStream(res, id); heartbeat = setInterval(() => res.write(": keep-alive\n\n"), 15_000); }
 			const onProgress = (message) => { if (streaming) streamDelta(res, id, "reasoning_content", `${message}\n`); };
+			const sessionId = `junior-silva-v2-${key}`;
 			const result = await serial(key, () => runInChat(chat, async () => {
-				const initial = await runPi(piPrompt(uploadText.instruction, files, requestWorkspace), `junior-silva-v2-${key}`, onProgress, chat, requestWorkspace, stop.signal);
-				return recoverUndeliveredArtifact({ instruction: uploadText.instruction, chat, requestWorkspace, sessionId: `junior-silva-v2-${key}`, initial, onProgress, signal: stop.signal });
+				const initial = await runPi({ requestId: id, makePrompt: (requestWorkspace) => piPrompt(uploadText.instruction, files, requestWorkspace), sessionId, onProgress, chat, signal: stop.signal });
+				return recoverUndeliveredArtifact({ instruction: uploadText.instruction, chat, sessionId, initial, onProgress, signal: stop.signal });
 			}));
 			if (heartbeat) clearInterval(heartbeat);
 			if (streaming) return finishStream(res, id, result.answer, includeStreamUsage ? result.usage : undefined);
@@ -812,7 +863,9 @@ const server = createServer(async (req, res) => {
 		if (heartbeat) clearInterval(heartbeat);
 		// Nobody is waiting for an answer, and a stop isn't a failure.
 		if (stop.signal.aborted) return;
-		console.error(`[junior-silva-v2] ${error?.stack || error}`);
+		// Not a failure either, but a sign that more slots are needed.
+		if (error?.busy) console.warn(`[junior-silva-v2] A message got the busy answer: no slot was free within ${SLOT_WAIT_MS} ms.`);
+		else console.error(`[junior-silva-v2] ${error?.stack || error}`);
 		const status = Number(error?.status || 500);
 		const message = status < 500 ? error.message : "Junior Silva could not complete this request. Please retry or contact the administrator.";
 		if (!res.headersSent) return json(res, status, { error: { message, type: "junior_silva_error" } });

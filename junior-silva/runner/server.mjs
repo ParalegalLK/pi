@@ -13,6 +13,7 @@ import { ensureSlot, slotNetwork } from "./slots.mjs";
 
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
 const RUN_TOKEN = /^[0-9a-f]{64}$/;
+const STOP_ROUTE = /^\/runs\/(chatcmpl-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/stop$/;
 
 function setting(name, fallback) {
 	const value = process.env[name];
@@ -128,7 +129,7 @@ async function readJson(req) {
 	}
 }
 
-// requestId -> { slot, userHash, name }
+// requestId -> { slot, userHash, name, stop }. stop is set once its container is starting.
 const runs = new Map();
 
 // slot -> the last check: { ok: true } or { ok: false, problem }
@@ -224,6 +225,7 @@ async function startRun(req, res) {
 		void docker(["kill", run.name]);
 		forceTimer = setTimeout(() => child.kill("SIGKILL"), 10_000);
 	};
+	run.stop = stop;
 	const startTimer = setTimeout(() => { if (!sawOutput) stop("no-start"); }, config.startTimeoutMs);
 	const runTimer = setTimeout(() => stop("timeout"), config.runTimeoutMs);
 	res.on("error", () => {});
@@ -266,6 +268,17 @@ async function startRun(req, res) {
 	child.on("close", (code, signal) => finish(code ?? (signal === "SIGKILL" ? 137 : 143)));
 }
 
+// The bridge's Stop. It's answered at once, and the run's own answer then ends with the reason
+// "stopped" once the container is gone, so the bridge knows when the slot is really free. A run
+// whose container isn't starting yet gets 404: the bridge then hangs up, which also stops it.
+function stopRun(res, requestId) {
+	const run = runs.get(requestId);
+	if (!run?.stop) return reply(res, 404, { error: "No such run is running" });
+	log(`run ${requestId}: the bridge asked to stop it`);
+	run.stop("stopped");
+	reply(res, 202, { stopping: requestId });
+}
+
 // Removes Pi containers this runner isn't running: at start all of them, since no run survives a
 // runner restart, and later any it lost track of.
 async function sweep({ all }) {
@@ -284,6 +297,8 @@ const server = createServer(async (req, res) => {
 		const route = new URL(req.url || "/", "http://runner.invalid").pathname;
 		if (req.method === "GET" && route === "/health") return await health(res);
 		if (req.method === "POST" && route === "/runs") return await startRun(req, res);
+		const stopping = req.method === "POST" && STOP_ROUTE.exec(route);
+		if (stopping) return stopRun(res, stopping[1]);
 		return reply(res, 404, { error: "Not found" });
 	} catch (error) {
 		console.error(`[junior-silva-runner] ${error?.stack || error}`);

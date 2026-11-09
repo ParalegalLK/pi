@@ -36,6 +36,9 @@ async function startBridge(overrides = {}) {
 			JUNIOR_SILVA_PORT: String(port),
 			PI_PROVIDER: "anthropic",
 			PI_MODEL: "claude-sonnet-5-5",
+			// Pi as a process here, as before P3. container-runs.test.mjs tests the container way.
+			JS_PI_EXECUTOR: "local",
+			JS_ALLOW_LOCAL_PI: "1",
 			ANTHROPIC_API_KEY: "test-anthropic-key",
 			JUNIOR_SILVA_PUBLIC_URL: `http://127.0.0.1:${port}`,
 			JUNIOR_SILVA_DATA_ROOT: root,

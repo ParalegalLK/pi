@@ -258,6 +258,9 @@ async function startServer(t, overrides = {}) {
 			JUNIOR_SILVA_PORT: String(port),
 			PI_PROVIDER: "anthropic",
 			PI_MODEL: "claude-sonnet-5-5",
+			// Pi as a process here, as before P3. container-runs.test.mjs tests the container way.
+			JS_PI_EXECUTOR: "local",
+			JS_ALLOW_LOCAL_PI: "1",
 			ANTHROPIC_API_KEY: "test-anthropic-key",
 			JUNIOR_SILVA_DATA_ROOT: dataRoot,
 			JUNIOR_SILVA_ARTIFACT_ROOT: path.join(dataRoot, "artifacts"),

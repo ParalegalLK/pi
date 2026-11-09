@@ -13,10 +13,13 @@ const prompt = await new Promise((resolve) => {
 });
 const workspace = process.env.JUNIOR_SILVA_WORKSPACE_ROOT;
 const dataRoot = process.env.JUNIOR_SILVA_DATA_ROOT;
-const isRepair = prompt.startsWith("A requested deliverable exists");
+const isRepair = prompt.startsWith("A requested deliverable");
 
-// A repair run's prompt doesn't repeat the user's message, so the first run leaves the details.
-const stateFile = path.join(dataRoot, `fake-pi-${path.basename(workspace)}.json`);
+// A repair run's prompt doesn't repeat the user's message, so the first run leaves the details, named
+// after its message folder. A repair run has a folder of its own, so it finds the first run's folder
+// from the file it's asked to inspect.
+const runFolder = isRepair ? path.dirname(/Inspect only (.+?)\. If it needs/.exec(prompt)?.[1] ?? "") : workspace;
+const stateFile = path.join(dataRoot, `fake-pi-${path.basename(runFolder)}.json`);
 if (!isRepair) writeFileSync(stateFile, JSON.stringify({ scenario: /SCENARIO-([A-Z_]+)/.exec(prompt)?.[1] ?? "OK", tag: /TAG-(\w+)/.exec(prompt)?.[1] ?? "" }));
 const { scenario, tag } = existsSync(stateFile) ? JSON.parse(readFileSync(stateFile, "utf8")) : { scenario: "OK", tag: "" };
 
