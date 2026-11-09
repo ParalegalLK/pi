@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// The runner (task/plan.md, section 3.10; task P3.4). The only part with Docker access: it starts and
-// stops Pi containers for the bridge, and nothing else. It holds no keys except its own secret, takes
+// The runner (task/plan.md, section 3.10; tasks P3.4 and P3.6). The only part with Docker access: it
+// starts and stops Pi containers for the bridge, and keeps their slot networks ready (slots.mjs), and
+// nothing else. It holds no keys except its own secret, takes
 // only checked inputs, and uses fixed Docker settings (docker-args.mjs). It never reads anything Pi
 // writes: Pi's output goes back as raw bytes, with the exit code and the reason as trailers.
 import { spawn } from "node:child_process";
@@ -8,6 +9,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
 import { containerName, piRunArgs, RUN_LABEL } from "./docker-args.mjs";
+import { ensureSlot, slotNetwork } from "./slots.mjs";
 
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
 const RUN_TOKEN = /^[0-9a-f]{64}$/;
@@ -44,6 +46,7 @@ try {
 		startGapMs: wholeNumber("JS_START_GAP_MS", 250),
 		sweepIntervalMs: wholeNumber("JS_SWEEP_INTERVAL_MS", 60_000),
 		docker: setting("JS_DOCKER_BIN", "docker"),
+		bridgeContainer: setting("JS_BRIDGE_CONTAINER", "junior-silva-v2"),
 		// Pi's error output can hold client text, so it's only shown with this, on the laptop.
 		debug: setting("JS_RUNNER_DEBUG", "") === "1",
 		piSettings: {
@@ -58,6 +61,7 @@ try {
 }
 if (config.secret.length < 32) refuseToStart("JS_RUNNER_SECRET must be set, with at least 32 characters");
 if (!config.piSettings.hostDataRoot) refuseToStart("JS_HOST_DATA_ROOT must be set");
+if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(config.bridgeContainer)) refuseToStart("JS_BRIDGE_CONTAINER must be a plain container name");
 try {
 	piRunArgs({ requestId: `chatcmpl-${"0".repeat(8)}-0000-4000-8000-${"0".repeat(12)}`, userHash: "0".repeat(32), chatHash: "0".repeat(32), slot: 1, model: "check" }, config.piSettings);
 } catch (error) {
@@ -127,6 +131,24 @@ async function readJson(req) {
 // requestId -> { slot, userHash, name }
 const runs = new Map();
 
+// slot -> the last check: { ok: true } or { ok: false, problem }
+const slotStatus = new Map();
+
+// Makes sure one slot's network is right and the bridge is on it. Logs only what changed.
+async function checkSlot(slot) {
+	const result = await ensureSlot(slot, { docker, bridgeContainer: config.bridgeContainer });
+	for (const change of result.changes ?? []) log(change);
+	const before = slotStatus.get(slot);
+	if (!result.ok && before?.problem !== result.problem) log(result.problem);
+	if (result.ok && before && !before.ok) log(`${slotNetwork(slot)} is ready again`);
+	slotStatus.set(slot, result);
+	return result;
+}
+
+async function checkAllSlots() {
+	for (let slot = 1; slot <= config.piSettings.slots; slot += 1) await checkSlot(slot);
+}
+
 // Starts are spaced apart, because gVisor sandboxes have been reported to hang when many start at once.
 let nextStartAt = 0;
 async function waitForStartTurn() {
@@ -143,7 +165,11 @@ async function health(res) {
 	]);
 	const runsc = info.code === 0 && /"runsc"\s*:/.test(info.stdout);
 	const imagePresent = image.code === 0;
-	reply(res, runsc && imagePresent ? 200 : 503, { runsc, image: imagePresent, slots: config.piSettings.slots, slotsInUse: runs.size });
+	const checked = [...slotStatus.values()];
+	const slotsReady = checked.filter((status) => status.ok).length;
+	const problems = checked.filter((status) => !status.ok).map((status) => status.problem);
+	const ready = runsc && imagePresent && slotsReady === config.piSettings.slots;
+	reply(res, ready ? 200 : 503, { runsc, image: imagePresent, slots: config.piSettings.slots, slotsReady, slotsInUse: runs.size, problems });
 }
 
 async function startRun(req, res) {
@@ -167,6 +193,12 @@ async function startRun(req, res) {
 
 	let bridgeLeft = false;
 	res.once("close", () => { bridgeLeft = true; });
+	// The bridge may have dropped off this slot, for example after its container was recreated.
+	const slotReady = await checkSlot(slot);
+	if (!slotReady.ok) {
+		runs.delete(requestId);
+		return reply(res, 503, { error: slotReady.problem });
+	}
 	await waitForStartTurn();
 	if (bridgeLeft) {
 		runs.delete(requestId);
@@ -269,5 +301,17 @@ process.once("SIGTERM", shutdown);
 process.once("SIGINT", shutdown);
 
 await sweep({ all: true });
-setInterval(() => void sweep({ all: false }), config.sweepIntervalMs).unref();
+await checkAllSlots();
+// Every sweep also reconnects the bridge to its slots, for example after its container was recreated.
+let maintaining = false;
+setInterval(async () => {
+	if (maintaining) return;
+	maintaining = true;
+	try {
+		await sweep({ all: false });
+		await checkAllSlots();
+	} finally {
+		maintaining = false;
+	}
+}, config.sweepIntervalMs).unref();
 server.listen(config.port, config.host, () => log(`listening on ${config.host}:${server.address().port}`));

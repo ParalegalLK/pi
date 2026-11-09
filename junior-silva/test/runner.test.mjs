@@ -9,6 +9,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { piRunArgs } from "../runner/docker-args.mjs";
+import { createSlotArgs } from "../runner/slots.mjs";
 
 const runnerPath = fileURLToPath(new URL("../runner/server.mjs", import.meta.url));
 const fakeDocker = fileURLToPath(new URL("./fixtures/fake-docker.mjs", import.meta.url));
@@ -36,11 +37,13 @@ function exitCode(child, ms = 10_000) {
 	return Promise.race([new Promise((resolve) => child.once("close", resolve)), delay(ms).then(() => "still running")]);
 }
 
-// Starts the runner with the fake docker command, a test secret and quick timings.
-async function startRunner(t, settings = {}, { plant = [] } = {}) {
+// Starts the runner with the fake docker command, a test secret and quick timings. prepare(folder)
+// can set up the fake's state first, such as a network someone else made.
+async function startRunner(t, settings = {}, { plant = [], prepare } = {}) {
 	const folder = await mkdtemp(path.join(os.tmpdir(), "junior-silva-runner-"));
 	await mkdir(path.join(folder, "leftovers"), { recursive: true });
 	for (const name of plant) await writeFile(path.join(folder, "leftovers", name), "");
+	if (prepare) await prepare(folder);
 	const child = spawn(process.execPath, [runnerPath], {
 		env: {
 			PATH: process.env.PATH,
@@ -145,7 +148,7 @@ test("health reports gVisor and the Pi image, and fails when either is missing",
 	const runner = await startRunner(t);
 	const healthy = await send(runner, "GET", "/health");
 	assert.equal(healthy.status, 200);
-	assert.deepEqual(healthy.json(), { runsc: true, image: true, slots: 3, slotsInUse: 0 });
+	assert.deepEqual(healthy.json(), { runsc: true, image: true, slots: 3, slotsReady: 3, slotsInUse: 0, problems: [] });
 	await writeFile(path.join(runner.folder, "no-runsc"), "");
 	assert.equal((await send(runner, "GET", "/health")).status, 503);
 	await rm(path.join(runner.folder, "no-runsc"));
@@ -284,4 +287,75 @@ test("on a stop signal, the runner kills its runs and exits", async (t) => {
 	runner.child.kill("SIGTERM");
 	assert.equal(await exitCode(runner.child), 0);
 	assert.ok((await calls(runner, "kill")).some((call) => call.args[0] === `js-run-${body.requestId}`));
+});
+
+const networkCalls = async (runner, action, slotName) =>
+	(await calls(runner, "network")).filter((call) => call.args[0] === action && (!slotName || call.args.includes(slotName)));
+
+test("at start, the runner creates the slot networks with the plan's settings, and connects the bridge at .2 on each", async (t) => {
+	const runner = await startRunner(t);
+	assert.deepEqual((await networkCalls(runner, "create")).map((call) => [call.command, ...call.args]), [1, 2, 3].map((slot) => createSlotArgs(slot)));
+	assert.deepEqual((await networkCalls(runner, "connect")).map((call) => call.args), [1, 2, 3].map((slot) => ["connect", "--ip", `10.89.${slot}.2`, `js-slot-${slot}`, "junior-silva-v2"]));
+	assert.match(runner.output(), /created js-slot-1/);
+	assert.match(runner.output(), /connected the bridge to js-slot-3 at 10\.89\.3\.2/);
+	assert.equal((await send(runner, "GET", "/health")).status, 200);
+});
+
+test("a slot network with a wrong setting is refused, never used or deleted, and the other slots still work", async (t) => {
+	const runner = await startRunner(t, {}, {
+		prepare: async (folder) => {
+			const wrong = { Name: "js-slot-2", Driver: "bridge", Internal: true, EnableIPv6: false, Options: {}, IPAM: { Config: [{ Subnet: "10.89.2.0/24" }] }, Labels: { "js.slot": "1" } };
+			await mkdir(path.join(folder, "networks"), { recursive: true });
+			await writeFile(path.join(folder, "networks", "js-slot-2.json"), JSON.stringify(wrong));
+		},
+	});
+	const health = await send(runner, "GET", "/health");
+	assert.equal(health.status, 503);
+	assert.equal(health.json().slotsReady, 2);
+	assert.deepEqual(health.json().problems, ["js-slot-2 can't be used: its gateway mode isn't isolated, so Pi could reach the server"]);
+	const refused = await send(runner, "POST", "/runs", { body: runBody({ slot: 2 }) });
+	assert.equal(refused.status, 503);
+	assert.match(refused.json().error, /js-slot-2 can't be used/);
+	assert.equal((await send(runner, "POST", "/runs", { body: runBody({ slot: 1 }) })).status, 200);
+	assert.equal((await calls(runner, "run")).length, 1, "only slot 1's run started");
+	assert.deepEqual(await networkCalls(runner, "rm"), [], "a wrong network must never be deleted");
+	assert.deepEqual(await networkCalls(runner, "connect", "js-slot-2"), [], "the bridge must not join a wrong network");
+});
+
+test("a bridge that dropped off a slot is reconnected before the next run on it", async (t) => {
+	const runner = await startRunner(t);
+	await rm(path.join(runner.folder, "attached", "js-slot-1"));
+	assert.equal((await send(runner, "POST", "/runs", { body: runBody({ slot: 1 }) })).status, 200);
+	const connects = await networkCalls(runner, "connect", "js-slot-1");
+	const [run] = await calls(runner, "run");
+	assert.equal(connects.length, 2, "connected at start, and again before the run");
+	assert.ok(connects[1].at <= run.at, "reconnected before Pi started");
+});
+
+test("a bridge that dropped off a slot is reconnected on the next sweep", async (t) => {
+	const runner = await startRunner(t, { JS_SWEEP_INTERVAL_MS: "300" });
+	await rm(path.join(runner.folder, "attached", "js-slot-2"));
+	assert.ok(await until(async () => (await networkCalls(runner, "connect", "js-slot-2")).length === 2), "the sweep must reconnect it");
+});
+
+test("a bridge on a slot at the wrong address is moved to .2", async (t) => {
+	const runner = await startRunner(t, {}, {
+		prepare: async (folder) => {
+			await mkdir(path.join(folder, "attached"), { recursive: true });
+			await writeFile(path.join(folder, "attached", "js-slot-1"), "10.89.1.9");
+		},
+	});
+	const moves = (await calls(runner, "network")).filter((call) => call.args.includes("js-slot-1") && ["disconnect", "connect"].includes(call.args[0]));
+	assert.deepEqual(moves.map((call) => call.args[0]), ["disconnect", "connect"]);
+	assert.equal(await readFile(path.join(runner.folder, "attached", "js-slot-1"), "utf8"), "10.89.1.2");
+});
+
+test("with no bridge container, the slots aren't ready and runs are refused", async (t) => {
+	const runner = await startRunner(t, {}, { prepare: (folder) => writeFile(path.join(folder, "no-bridge"), "") });
+	const health = await send(runner, "GET", "/health");
+	assert.equal(health.status, 503);
+	assert.equal(health.json().slotsReady, 0);
+	assert.deepEqual([...new Set(health.json().problems)], ["the bridge container junior-silva-v2 isn't there"]);
+	assert.equal((await send(runner, "POST", "/runs", { body: runBody() })).status, 503);
+	assert.deepEqual(await calls(runner, "run"), []);
 });

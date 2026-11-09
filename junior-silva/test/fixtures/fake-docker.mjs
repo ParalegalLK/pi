@@ -9,15 +9,19 @@
 //   cannot-start  writes Docker's own error to stderr, then exits 125
 //   slow          writes a line, then waits until killed
 //   silent        writes nothing, and waits until killed
-// Files a test can create: <folder>/no-runsc, <folder>/no-image, and <folder>/leftovers/<name>.
+// It also keeps networks in <folder>/networks/<name>.json, as `docker network inspect` prints them, and
+// the bridge's slot addresses in <folder>/attached/<network>.
+// Files a test can create: <folder>/no-runsc, <folder>/no-image, <folder>/no-bridge,
+// <folder>/leftovers/<name>, and <folder>/networks/<name>.json for a network made by someone else.
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 const folder = path.dirname(new URL(process.env.DOCKER_HOST).pathname);
 const running = path.join(folder, "running");
 const leftovers = path.join(folder, "leftovers");
-mkdirSync(running, { recursive: true });
-mkdirSync(leftovers, { recursive: true });
+const networks = path.join(folder, "networks");
+const attached = path.join(folder, "attached");
+for (const made of [running, leftovers, networks, attached]) mkdirSync(made, { recursive: true });
 const [command, ...args] = process.argv.slice(2);
 
 function record(entry = {}) {
@@ -77,6 +81,52 @@ async function fakeRun() {
 	setInterval(() => {}, 1000);
 }
 
+function fakeNetwork() {
+	const [action, ...rest] = args;
+	const flag = (name) => rest[rest.indexOf(name) + 1];
+	if (action === "inspect") {
+		const file = path.join(networks, `${rest.at(-1)}.json`);
+		if (existsSync(file)) process.stdout.write(readFileSync(file));
+		else {
+			process.stderr.write(`Error response from daemon: network ${rest.at(-1)} not found\n`);
+			process.exitCode = 1;
+		}
+	} else if (action === "create") {
+		const pairs = (name) => rest.flatMap((arg, index) => (rest[index - 1] === name ? [arg.split("=")] : []));
+		const network = {
+			Name: rest.at(-1),
+			Driver: flag("--driver"),
+			Internal: rest.includes("--internal"),
+			EnableIPv6: false,
+			Options: Object.fromEntries(pairs("--opt")),
+			IPAM: { Config: [{ Subnet: flag("--subnet") }] },
+			Labels: Object.fromEntries(pairs("--label")),
+		};
+		writeFileSync(path.join(networks, `${network.Name}.json`), JSON.stringify(network));
+	} else if (action === "connect") {
+		if (existsSync(path.join(folder, "no-bridge"))) {
+			process.stderr.write("Error response from daemon: No such container\n");
+			process.exitCode = 1;
+		} else writeFileSync(path.join(attached, rest.at(-2)), flag("--ip"));
+	} else if (action === "disconnect") {
+		rmSync(path.join(attached, rest.at(-2)), { force: true });
+	} else process.exitCode = 1;
+}
+
+// `docker inspect --format {{json .NetworkSettings.Networks}} <bridge>`: the bridge's slot addresses.
+function inspectContainer() {
+	if (existsSync(path.join(folder, "no-bridge"))) {
+		process.stderr.write("Error: No such object\n");
+		process.exitCode = 1;
+		return;
+	}
+	const joined = Object.fromEntries(readdirSync(attached).map((name) => {
+		const address = readFileSync(path.join(attached, name), "utf8");
+		return [name, { IPAMConfig: { IPv4Address: address }, IPAddress: address }];
+	}));
+	console.log(JSON.stringify(joined));
+}
+
 switch (command) {
 	case "info":
 		record();
@@ -103,6 +153,14 @@ switch (command) {
 		break;
 	case "run":
 		await fakeRun();
+		break;
+	case "network":
+		record();
+		fakeNetwork();
+		break;
+	case "inspect":
+		record();
+		inspectContainer();
 		break;
 	default:
 		record({ unknown: true });

@@ -109,7 +109,8 @@ pi/
 │   │   └── render_review_docx.ps1           Windows/WSL renderer wrapper
 │   ├── runner/
 │   │   ├── docker-args.mjs                  the fixed Docker settings for one Pi run
-│   │   └── server.mjs                       the runner: starts and stops Pi containers for the bridge
+│   │   ├── server.mjs                       the runner: starts and stops Pi containers for the bridge
+│   │   └── slots.mjs                        the slot networks, and keeping the bridge connected to them
 │   ├── server/
 │   │   └── openai.mjs                       OpenAI bridge, HMAC conversation sessions, upload manifest/deduplication and SSE progress
 │   ├── services/
