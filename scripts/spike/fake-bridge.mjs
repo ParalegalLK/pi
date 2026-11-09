@@ -112,7 +112,7 @@ const mcpTools = [{
 
 async function fakeMcp(req, res) {
 	const message = JSON.parse(await readBody(req));
-	log({ kind: "mcp", method: message.method, tool: message.params?.name || null });
+	log({ kind: "mcp", method: message.method, tool: message.params?.name || null, tokenMatches: req.headers.authorization === `Bearer ${TOKEN}` });
 	const reply = (result) => send(res, 200, { jsonrpc: "2.0", id: message.id, result });
 	if (message.method === "initialize") {
 		return reply({ protocolVersion: "2025-06-18", capabilities: { tools: { listChanged: false } }, serverInfo: { name: "spike-fake-bridge", version: "1.0.0" } });

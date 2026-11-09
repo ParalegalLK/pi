@@ -101,6 +101,8 @@ pi/
 │   │   ├── typesense-legal-sources.mjs      bounded direct legal-source detail retrieval
 │   │   └── time.mjs                         Colombo temporal context for current-source research
 │   ├── mcp/
+│   │   ├── launcher.mjs                     Pi's tool helper on the laptop: sends tool calls to the bridge
+│   │   ├── sandbox-launcher.mjs             Pi's tool helper in the Pi image: forwards only, no tool code
 │   │   └── server.mjs                       MCP protocol implementation and tool declarations
 │   ├── review/
 │   │   ├── render_review_docx.py            source-anchored DOCX comments/highlights renderer

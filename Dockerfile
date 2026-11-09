@@ -88,6 +88,10 @@ RUN node /tmp/check-pi-packages.mjs && rm -rf /tmp/check-pi-packages.mjs /root/.
 COPY .pi/extensions/junior-silva-legal-context.ts .pi/extensions/junior-silva-scope-guard.ts \
      .pi/extensions/legal-research-citation-delivery.ts .pi/extensions/librechat-preview-delivery.ts ./.pi/extensions/
 COPY junior-silva/core/legal-scope.mjs ./junior-silva/core/legal-scope.mjs
+# Pi's tool helper only forwards tool calls to the bridge, and holds no tool code. It goes where
+# .pi/mcp.json already looks.
+COPY .pi/mcp.json ./.pi/mcp.json
+COPY junior-silva/mcp/sandbox-launcher.mjs ./junior-silva/mcp/launcher.mjs
 COPY .agents/skills ./.agents/skills
 # The start-up script checks the runner's settings, fills Pi's settings folder (/run/pi-agent, in
 # memory), makes this message's folder, then starts Pi.
