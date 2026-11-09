@@ -564,7 +564,8 @@ live_problem() {
 		echo "only $memory MiB of RAM free, need $MIN_FREE_MEMORY_MIB"
 	elif [ "$disk" -lt "$MIN_FREE_DISK_MIB" ]; then
 		echo "only $disk MiB of disk free, need $MIN_FREE_DISK_MIB"
-	elif awk -v load="$load" -v cores="$(nproc)" 'BEGIN {exit !(load >= cores)}'; then
+	# gawk, the usual awk on Ubuntu servers, won't take "load" as a variable name.
+	elif awk -v current="$load" -v cores="$(nproc)" 'BEGIN {exit !(current >= cores)}'; then
 		echo "CPU load is $load on $(nproc) cores"
 	else
 		containers_changed
