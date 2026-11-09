@@ -1,6 +1,7 @@
-# This file builds two images:
+# This file builds three images:
 #   bridge (the default):  docker compose build junior-silva-v2
 #   pi-sandbox:            docker build --target pi-sandbox -t junior-silva-pi:local .
+#   runner:                docker build --target runner -t junior-silva-runner:local .
 #
 # The base image is pinned by digest, so a moved tag can't start a surprise full rebuild. The digest
 # is the multi-platform index, so the same line builds on x86 and ARM servers. To move to a newer
@@ -106,7 +107,19 @@ ENV NODE_ENV=production \
 USER node
 ENTRYPOINT ["/app/deploy/pi-entrypoint.sh"]
 
-# Stage 3: the bridge image. Keep it last: `docker compose build` builds the last stage.
+# Stage 3: the runner. The only part with Docker access: it starts and stops Pi containers for the
+# bridge (task P3.4). It holds Node, the Docker command and its own code, and no keys.
+FROM ${NODE_IMAGE} AS runner
+COPY --from=docker:29.9.2-cli@sha256:5e6baf67325a79f64ed3bed6863954d5e05d0f3d4e57cbdb14809346814bbfdb /usr/local/bin/docker /usr/local/bin/docker
+WORKDIR /app
+COPY junior-silva/runner ./junior-silva/runner
+ENV NODE_ENV=production
+USER node
+EXPOSE 8128
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD ["node", "-e", "fetch('http://127.0.0.1:'+(process.env.JS_RUNNER_PORT||8128)+'/health',{headers:{authorization:'Bearer '+process.env.JS_RUNNER_SECRET}}).then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+CMD ["node", "junior-silva/runner/server.mjs"]
+
+# Stage 4: the bridge image. Keep it last: `docker compose build` builds the last stage.
 FROM build AS bridge
 COPY junior-silva/package.json junior-silva/package-lock.json ./junior-silva/
 RUN npm --prefix junior-silva ci --omit=dev --ignore-scripts

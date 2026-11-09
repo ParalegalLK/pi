@@ -107,6 +107,9 @@ pi/
 │   ├── review/
 │   │   ├── render_review_docx.py            source-anchored DOCX comments/highlights renderer
 │   │   └── render_review_docx.ps1           Windows/WSL renderer wrapper
+│   ├── runner/
+│   │   ├── docker-args.mjs                  the fixed Docker settings for one Pi run
+│   │   └── server.mjs                       the runner: starts and stops Pi containers for the bridge
 │   ├── server/
 │   │   └── openai.mjs                       OpenAI bridge, HMAC conversation sessions, upload manifest/deduplication and SSE progress
 │   ├── services/
@@ -275,6 +278,12 @@ The Pi sandbox image, which each Pi run will use in its own container, is built 
 
 ~~~bash
 docker build --target pi-sandbox -t junior-silva-pi:local .
+~~~
+
+The runner image, the only part allowed to start and stop Pi containers, is built the same way:
+
+~~~bash
+docker build --target runner -t junior-silva-runner:local .
 ~~~
 
 Compose connects to librechat_default and rag-chat-server_default external Docker networks by default. The active external service hostnames are RAG Chat Server and Translator; legacy Reviewer/Drafter endpoint configuration can be removed after operational migration.
