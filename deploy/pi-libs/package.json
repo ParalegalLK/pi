@@ -1,0 +1,16 @@
+{
+	"name": "junior-silva-pi-libs",
+	"private": true,
+	"description": "Node packages built into the Pi sandbox image: the two Pi's bundle loads at run time (jiti, photon-node, at the versions Pi is built with) and the skills' libraries.",
+	"dependencies": {
+		"@silvia-odwyer/photon-node": "0.3.4",
+		"docx": "9.14.0",
+		"jiti": "2.7.0",
+		"playwright": "1.63.0",
+		"pptxgenjs": "4.0.1",
+		"react": "19.3.0",
+		"react-dom": "19.3.0",
+		"react-icons": "5.7.0",
+		"sharp": "0.35.5"
+	}
+}

@@ -127,7 +127,7 @@ pi/
 ├── .env                                     local/server secrets; ignored by Git
 ├── .env.example                             safe configuration template
 ├── .gitignore                               excludes secrets, sessions, uploads and artifacts
-├── Dockerfile                               Pi build plus V2 runtime image
+├── Dockerfile                               bridge image, and the Pi sandbox image (target pi-sandbox)
 ├── docker-compose.yml                       HTTP service and optional interactive CLI profile
 ├── Start-JuniorSilvaV2.ps1                  Windows Pi launcher
 ├── Start-JuniorSilvaV2.sh                   Linux/WSL Pi launcher
@@ -267,6 +267,12 @@ The container listens on 8126; Compose publishes it as 127.0.0.1:8132. Pi's tool
 
 ~~~bash
 docker compose --profile cli run --rm junior-silva-cli
+~~~
+
+The Pi sandbox image, which each Pi run will use in its own container, is built from the same Dockerfile:
+
+~~~bash
+docker build --target pi-sandbox -t junior-silva-pi:local .
 ~~~
 
 Compose connects to librechat_default and rag-chat-server_default external Docker networks by default. The active external service hostnames are RAG Chat Server and Translator; legacy Reviewer/Drafter endpoint configuration can be removed after operational migration.
