@@ -243,8 +243,8 @@ fi
 internet_control="$(spike_probe -- net 1.1.1.1:443 | awk '{print $2}')"
 [ "$internet_control" = open ] && record PASS network-n "control: this machine has internet, so a block from Pi is real" || record INFO network-n "this machine has no internet ($internet_control), so the internet block proves nothing here"
 # Every TCP port this machine listens on, on each of its addresses (P7.8), such as another service's published
-# ports. Ports open only to its own loopback are left out: a container can't reach them. The control: each
-# one answers from this machine itself. Prints "<target> <open or the error>" per line.
+# ports. Ports open only to its own loopback are left out: a container can't reach them. The control: they
+# answer from this machine itself. Prints "<target> <open or the error>" per line.
 host_ports="$(python3 -I - <<'PY'
 import ipaddress, socket, subprocess
 from concurrent.futures import ThreadPoolExecutor
@@ -284,11 +284,15 @@ with ThreadPoolExecutor(32) as pool:
 PY
 )"
 host_targets="$(printf '%s\n' "$host_ports" | awk 'NF {print $1}' | xargs)"
-if [ -n "$host_targets" ]; then
-	record INFO network-host "the host listens beyond its loopback on port(s) $(printf '%s\n' $host_targets | sed 's/.*://' | sort -un | xargs), on $(printf '%s\n' $host_targets | sed 's/:[0-9]*$//' | sort -u | wc -l) address(es): $(wc -w <<< "$host_targets") target(s)"
-	check network-host "control: every one of them answers from the host itself" "" "$(printf '%s\n' "$host_ports" | awk 'NF && $2 != "open" {print $1 "=" $2}' | xargs)"
+host_live="$(printf '%s\n' "$host_ports" | awk '$2 == "open"' | wc -l)"
+host_quiet="$(printf '%s\n' "$host_ports" | awk 'NF && $2 != "open" {print $1 "=" $2}' | xargs)"
+[ -z "$host_targets" ] || record INFO network-host "the host listens beyond its loopback on port(s) $(printf '%s\n' $host_targets | sed 's/.*://' | sort -un | xargs), on $(printf '%s\n' $host_targets | sed 's/:[0-9]*$//' | sort -u | wc -l) address(es): $(wc -w <<< "$host_targets") target(s)"
+if [ "$host_live" -gt 0 ]; then
+	record PASS network-host "control: $host_live of the $(wc -w <<< "$host_targets") answer from the host itself"
+	# A target the host itself is refused on, by its firewall for example, is closed there: no hole, but no proof either.
+	[ -z "$host_quiet" ] || record INFO network-host "the host itself gets no connection on these, so they prove nothing: $host_quiet"
 else
-	record FAIL network-host "control: no port on the host to try, so the test proves nothing"
+	record FAIL network-host "control: no port answered from the host itself, so the test proves nothing"
 fi
 probe_input="$(python3 -I - "$PROBE_A" "$PROBE_B" "$PROBE_CHAT_A" "$PROBE_CHAT_B" "$RUN_ID" "$PROBE_SLOT" "$OTHER_SLOT" "$GATEWAY_PORT" "$HOST_PORT" "$RUNNER_IP" "$PI_IMAGE" "$host_targets" <<'PY'
 import json, socket, subprocess, sys
