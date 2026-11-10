@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Isolation check (task/plan.md, section 7; task P3.15). It attacks the walls of the running stack as a
+# Isolation check (task/plan.md, section 7; tasks P3.15 and P7.8). It attacks the walls of the running stack as a
 # test user B, against a test user A's data, and prints a result for each row of the tracker's isolation
 # table (task/tracker.md, section 5):
 #   PASS   the wall held, and its control showed the target was really there
@@ -15,7 +15,7 @@
 # throwaway containers on a slot. It puts everything back when it ends. If that fails, run
 # `docker compose up -d` in pi/.
 #
-# Needs docker with compose, python3 and curl on this machine, the stack started from pi/ with
+# Needs docker with compose, python3, curl and ss on this machine, the stack started from pi/ with
 # `docker compose up -d`, a bridge image built from this code, and pi/.env. It never prints a secret value.
 set -u
 PI_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -41,6 +41,7 @@ declare -A ROW_LABEL=(
 	[sandbox-writes]="Sandbox: Write to uploads, artifacts, /app, /"
 	[sandbox-powers]="Sandbox: docker.sock, capabilities"
 	[network-n]="Network: All N checks; 8127 works with the token"
+	[network-host]="Network: Every port the host listens on, from a slot (P7.8)"
 	[network-8126]="Network: Pi to bridge 8126, including /files and /v1"
 	[runner]="Runner: Pi to the runner's address"
 	[tools-path]="Tools: Each bridge path tool with A's path"
@@ -58,7 +59,7 @@ declare -A ROW_LABEL=(
 	[browser]="Browser: two accounts, and the 29 Oct attack"
 	[functional]="Functional: TESTING.md in full"
 )
-ROW_ORDER=(settings sandbox-users sandbox-other sandbox-env sandbox-view sandbox-writes sandbox-powers network-n network-8126 runner tools-path document-fetch proxy-calls proxy-content proxy-errors answer-filter links limits stop fail-closed images logs browser functional)
+ROW_ORDER=(settings sandbox-users sandbox-other sandbox-env sandbox-view sandbox-writes sandbox-powers network-n network-host network-8126 runner tools-path document-fetch proxy-calls proxy-content proxy-errors answer-filter links limits stop fail-closed images logs browser functional)
 
 record() { # record <PASS|FAIL|LATER|INFO> <row> <text>
 	local verdict="$1" row="$2" text="$3"
@@ -172,7 +173,7 @@ trap cleanup EXIT
 trap 'exit 130' INT TERM
 
 echo "=== 0. Before starting"
-for command in docker python3 curl; do command -v "$command" >/dev/null || stop_now "$command is missing on this machine"; done
+for command in docker python3 curl ss; do command -v "$command" >/dev/null || stop_now "$command is missing on this machine"; done
 docker compose version >/dev/null 2>&1 || stop_now "docker compose is missing"
 [ -f .env ] || stop_now "pi/.env is missing"
 [ "$(inspect "$BRIDGE" '{{.State.Running}}')" = true ] || stop_now "the bridge isn't running: start the stack with docker compose up -d"
@@ -241,9 +242,57 @@ else
 fi
 internet_control="$(spike_probe -- net 1.1.1.1:443 | awk '{print $2}')"
 [ "$internet_control" = open ] && record PASS network-n "control: this machine has internet, so a block from Pi is real" || record INFO network-n "this machine has no internet ($internet_control), so the internet block proves nothing here"
-probe_input="$(python3 -I - "$PROBE_A" "$PROBE_B" "$PROBE_CHAT_A" "$PROBE_CHAT_B" "$RUN_ID" "$PROBE_SLOT" "$OTHER_SLOT" "$GATEWAY_PORT" "$HOST_PORT" "$RUNNER_IP" "$PI_IMAGE" <<'PY'
+# Every TCP port this machine listens on, on each of its addresses (P7.8), such as another service's published
+# ports. Ports open only to its own loopback are left out: a container can't reach them. The control: each
+# one answers from this machine itself. Prints "<target> <open or the error>" per line.
+host_ports="$(python3 -I - <<'PY'
+import ipaddress, socket, subprocess
+from concurrent.futures import ThreadPoolExecutor
+def output(*command):
+    return subprocess.run(command, capture_output=True, text=True).stdout
+addresses = [ipaddress.ip_address(address) for address in output("hostname", "-I").split()]
+targets = set()
+for line in output("ss", "-ltnH").splitlines():
+    fields = line.split()
+    if len(fields) < 4:
+        continue
+    host, _, port = fields[3].rpartition(":")
+    host = host.strip("[]").split("%")[0]
+    if host in ("*", "::", "0.0.0.0"):
+        wanted = [address for address in addresses if host != "0.0.0.0" or address.version == 4]
+    else:
+        try:
+            one = ipaddress.ip_address(host)
+        except ValueError:
+            continue
+        if one.version == 6 and one.ipv4_mapped:
+            one = one.ipv4_mapped
+        wanted = [] if one.is_loopback or one.is_link_local else [one]
+    for address in wanted:
+        targets.add(f"[{address}]:{port}" if address.version == 6 else f"{address}:{port}")
+def answer(target):
+    host, _, port = target.rpartition(":")
+    try:
+        socket.create_connection((host.strip("[]"), int(port)), timeout=3).close()
+        return "open"
+    except OSError as error:
+        return type(error).__name__
+targets = sorted(targets)
+with ThreadPoolExecutor(32) as pool:
+    for target, result in zip(targets, pool.map(answer, targets)):
+        print(target, result)
+PY
+)"
+host_targets="$(printf '%s\n' "$host_ports" | awk 'NF {print $1}' | xargs)"
+if [ -n "$host_targets" ]; then
+	record INFO network-host "the host listens beyond its loopback on port(s) $(printf '%s\n' $host_targets | sed 's/.*://' | sort -un | xargs), on $(printf '%s\n' $host_targets | sed 's/:[0-9]*$//' | sort -u | wc -l) address(es): $(wc -w <<< "$host_targets") target(s)"
+	check network-host "control: every one of them answers from the host itself" "" "$(printf '%s\n' "$host_ports" | awk 'NF && $2 != "open" {print $1 "=" $2}' | xargs)"
+else
+	record FAIL network-host "control: no port on the host to try, so the test proves nothing"
+fi
+probe_input="$(python3 -I - "$PROBE_A" "$PROBE_B" "$PROBE_CHAT_A" "$PROBE_CHAT_B" "$RUN_ID" "$PROBE_SLOT" "$OTHER_SLOT" "$GATEWAY_PORT" "$HOST_PORT" "$RUNNER_IP" "$PI_IMAGE" "$host_targets" <<'PY'
 import json, socket, subprocess, sys
-a, b, chat_a, chat_b, run_id, slot, other, gateway_port, host_port, runner_ip, image = sys.argv[1:]
+a, b, chat_a, chat_b, run_id, slot, other, gateway_port, host_port, runner_ip, image, host_targets = sys.argv[1:]
 def lines(*command):
     return subprocess.run(command, capture_output=True, text=True).stdout.split()
 host_ip = (lines("hostname", "-I") or [""])[0]
@@ -251,6 +300,7 @@ blocked = [{"group": "the host (slot gateway, Docker's own address, this machine
 if other:
     blocked += [{"group": f"slot {other}: its bridge address and its Pi address", "target": t} for t in [f"10.89.{other}.2:{gateway_port}", f"10.89.{other}.3:9000"]]
 blocked.append({"group": "the metadata address", "target": "169.254.169.254:80"})
+blocked += [{"group": "every port the host listens on, on each of its addresses", "target": t, "row": "network-host"} for t in host_targets.split()]
 for container in lines("docker", "ps", "--format", "{{.Names}}"):
     if container.startswith("js-check-") or container == "junior-silva-runner":
         continue

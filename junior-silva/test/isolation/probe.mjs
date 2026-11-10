@@ -159,15 +159,16 @@ let table = "";
 codeOf(() => { table = readFileSync("/proc/net/route", "utf8"); });
 const defaultRoute = table.split("\n").slice(1).some((line) => line.split(/\s+/)[1] === "00000000");
 report(!defaultRoute, "network-n", `default route: ${defaultRoute ? "present" : "absent"}`);
+// Each group reports under its own row: network-n, or network-host for the host's own ports (P7.8).
 const groups = new Map();
-for (const { group, target } of input.blocked) {
-	if (!groups.has(group)) groups.set(group, []);
-	groups.get(group).push(target);
+for (const { group, target, row = "network-n" } of input.blocked) {
+	if (!groups.has(group)) groups.set(group, { row, targets: [] });
+	groups.get(group).targets.push(target);
 }
-for (const [group, targets] of groups) {
+for (const [group, { row, targets }] of groups) {
 	const results = await Promise.all(targets.map(async (target) => ({ target, result: await connect(target) })));
 	const through = results.filter(({ result }) => reached(result));
-	report(through.length === 0, "network-n", `${group}: ${targets.length} target(s), none reached${through.length ? `; REACHED ${through.map(({ target, result }) => `${target} ${result}`).join(" ")}` : ` (${[...new Set(results.map(({ result }) => result))].join(", ")})`}`);
+	report(through.length === 0, row, `${group}: ${targets.length} target(s), none reached${through.length ? `; REACHED ${through.map(({ target, result }) => `${target} ${result}`).join(" ")}` : ` (${[...new Set(results.map(({ result }) => result))].join(", ")})`}`);
 }
 const internet = await Promise.all(input.internet.map(async (target) => `${target} ${await connect(target)}`));
 report(!internet.some((line) => / (open|refused)$/.test(line)), "network-n", `internet: ${internet.join(", ")}`);

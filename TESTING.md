@@ -49,7 +49,8 @@ Run the focused tests for the feature changed in the current work first. Do not 
 `scripts/js-isolation-check.sh --yes` attacks the walls of the running stack as a test user B, against a test user A's data. It prints PASS, FAIL or LATER for each row of the isolation table in `task/tracker.md` (section 5), and its exit code is the number of failures. Its pieces are in `junior-silva/test/isolation/`.
 
 - Run it only when nobody is using the stack. It takes about 10 minutes, switches the bridge to a stand-in model with a test key, and stops the runner briefly. It puts everything back when it ends; if it can't, run `docker compose up -d`.
-- It needs the stack started with `docker compose up -d`, a bridge image built from the current code (`docker compose build`), `.env`, and `docker`, `python3` and `curl` on the machine. It uses no real model and never prints a secret value.
+- It needs the stack started with `docker compose up -d`, a bridge image built from the current code (`docker compose build`), `.env`, and `docker`, `python3`, `curl` and `ss` on the machine. It uses no real model and never prints a secret value.
+- On a shared server it matters most that Pi can't reach the server's other services. So from a slot, it tries every TCP port the host listens on, on each of the host's addresses (P7.8). Ports open only to the host's own loopback are left out, because a container can't reach them. Its control is that each one answers from the host itself.
 - Direct probes run a script inside a real Pi container, started with the runner's own Docker settings but without Pi, because Pi's guard would block some attacks first and hide a weak wall.
 - Full-chain tests run real Pi through the real bridge and runner, with the stand-in model scripting the attacks. Each one first proves the attack really ran.
 - Every wall test has a positive control, such as user A's file being on disk while B tries to read it. A failed control counts as a failure.
