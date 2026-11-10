@@ -135,7 +135,8 @@ pi/
 ├── .env.example                             safe configuration template
 ├── .gitignore                               excludes secrets, sessions, uploads and artifacts
 ├── Dockerfile                               bridge image, and the Pi sandbox image (target pi-sandbox)
-├── docker-compose.yml                       HTTP service and optional interactive CLI profile
+├── docker-compose.yml                       the bridge, the runner, and how the Pi image is built
+├── docker-compose.dev.yml                   developer-only interactive CLI, with no sandbox
 ├── Start-JuniorSilvaV2.ps1                  Windows Pi launcher
 ├── Start-JuniorSilvaV2.sh                   Linux/WSL Pi launcher
 ├── Setup-JuniorSilvaV2.ps1                  Windows setup and optional Docker runner
@@ -262,30 +263,27 @@ On first use, approve the project MCP server. The interactive client uses the sa
 
 ### Docker HTTP endpoint
 
+Compose runs two services. The bridge (`junior-silva-v2`) holds the keys and serves LibreChat. The runner (`junior-silva-runner`), the only part with Docker access, starts each message's Pi in its own gVisor container from the `junior-silva-pi:local` image, and removes it afterwards. Docker needs gVisor (`scripts/js-install-gvisor.sh`), and `.env` needs:
+
+- `JS_RUNNER_SECRET`: at least 32 characters, from `openssl rand -hex 32`
+- `JS_HOST_DATA_ROOT`: the host folder that holds every chat's folders, outside the repository. Create it first, with mode 700 and owned by user 1000
+- `JS_DOCKER_GID`: the Docker group's number, from `getent group docker | cut -d: -f3`
+
 ~~~bash
 cd '/mnt/d/Intern/Work/Junior Silva V2/pi'
-docker compose build junior-silva-v2
-docker compose up -d --force-recreate junior-silva-v2
-docker compose ps junior-silva-v2
+docker compose build                    # the bridge and the runner
+docker compose build junior-silva-pi    # the Pi image, when its files change; the first build is slow
+docker compose up -d
+docker compose ps
 curl http://127.0.0.1:8132/health
 ~~~
 
-The container listens on 8126; Compose publishes it as 127.0.0.1:8132. Pi's tool calls use port 8127 inside the container, which is never published. The optional interactive container is started with:
+The bridge listens on 8126; Compose publishes it as 127.0.0.1:8132. Pi's model and tool calls use port 8127 on the bridge's private slot addresses, which is never published. The runner has no published port either: only the bridge reaches it, on the internal `js-control` network.
+
+The optional interactive container is for one developer on their own machine. It runs Pi with every key and no sandbox, so it is in a separate file that a server never uses:
 
 ~~~bash
-docker compose --profile cli run --rm junior-silva-cli
-~~~
-
-The Pi sandbox image, which each Pi run will use in its own container, is built from the same Dockerfile:
-
-~~~bash
-docker build --target pi-sandbox -t junior-silva-pi:local .
-~~~
-
-The runner image, the only part allowed to start and stop Pi containers, is built the same way:
-
-~~~bash
-docker build --target runner -t junior-silva-runner:local .
+docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile cli run --rm junior-silva-cli
 ~~~
 
 Compose connects to librechat_default and rag-chat-server_default external Docker networks by default. The active external service hostnames are RAG Chat Server and Translator; legacy Reviewer/Drafter endpoint configuration can be removed after operational migration.

@@ -23,66 +23,89 @@ services:
       TRANSLATOR_BASE_URL: ${TRANSLATOR_BASE_URL:-https://www.devtranslate.paralegal.lk/api}
 
       JUNIOR_SILVA_KB_ROOT: /kb
-      # Pi still runs inside this container until P3.8 adds the runner service. This way is for
-      # development only, so it has to be allowed on purpose.
-      JS_PI_EXECUTOR: local
-      JS_ALLOW_LOCAL_PI: "1"
+      # Each message's Pi runs in its own gVisor container, which the runner below starts.
+      JS_PI_EXECUTOR: container
+      JS_RUNNER_URL: http://junior-silva-runner:8128
+      # Pi's containers call the gateway on the bridge's slot addresses. It still refuses calls
+      # from LibreChat's side, and it's never published.
+      JS_GATEWAY_HOST: 0.0.0.0
+      # The runner gets the same values from the same lines, so the two can't disagree.
+      JS_RUNNER_SECRET: ${JS_RUNNER_SECRET:?Set JS_RUNNER_SECRET in .env}
+      JS_GATEWAY_PORT: ${JS_GATEWAY_PORT:-8127}
+      JS_SLOTS: ${JS_SLOTS:-3}
     ports:
       - "127.0.0.1:8132:8126"
     volumes:
-      - junior_silva_v2_data:/data
-      - ./junior-silva/artifacts:/data/artifacts
-      - ./junior-silva/uploads:/data/uploads
-
-      - ./junior-silva/workspace:/data/workspace
-      - ./junior-silva/sessions:/data/sessions
-      - ./junior-silva/pi-agent:/data/pi-agent
+      # Every chat's folders live in one host folder. The runner gives each Pi its own chat's folders
+      # from the same place, so it has to be a host folder. Create it first, with mode 700 and owned
+      # by user 1000, because Docker would make a missing one owned by root.
+      - type: bind
+        source: ${JS_HOST_DATA_ROOT:?Set JS_HOST_DATA_ROOT in .env}
+        target: /data
+        bind:
+          create_host_path: false
       - ${JUNIOR_SILVA_KB_HOST_PATH:-./junior-silva/empty-kb}:/kb:ro
     networks:
       - librechat
       - rag
+      - js-control
+    depends_on:
+      - junior-silva-runner
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    cap_drop:
+      - ALL
     security_opt:
       - no-new-privileges:true
+    mem_limit: 2g
+    memswap_limit: 2g
+    # The bridge is on several networks, and must never pass a Pi's traffic from one to another.
+    sysctls:
+      net.ipv4.ip_forward: 0
 
-  junior-silva-cli:
-    profiles: ["cli"]
-    image: junior-silva-v2:local
-    env_file: .env
+  # The only service with Docker access. It starts and stops each message's Pi container for the
+  # bridge, with fixed settings, and holds no key except its own secret (task/plan.md 3.10).
+  junior-silva-runner:
+    build:
+      context: .
+      target: runner
+    image: junior-silva-runner:local
+    container_name: junior-silva-runner
+    restart: unless-stopped
+    # No env_file, so the runner never gets the API keys in .env.
     environment:
-      JUNIOR_SILVA_PUBLIC_URL: ${JUNIOR_SILVA_PUBLIC_URL:-http://127.0.0.1:8132}
-      JUNIOR_SILVA_DATA_ROOT: /data
-      JUNIOR_SILVA_ARTIFACT_ROOT: /data/artifacts
-      JUNIOR_SILVA_UPLOAD_ROOT: /data/uploads
-
-      JUNIOR_SILVA_WORKSPACE_ROOT: /data/workspace
-      PI_CODING_AGENT_DIR: /data/pi-agent
-      PI_CODING_AGENT_SESSION_DIR: /data/sessions
-      REVIEWER_BASE_URL: ${JUNIOR_SILVA_DOCKER_REVIEWER_BASE_URL:-http://reviewer_agent_v2_pi_api:8124}
-      RAG_BASE_URL: ${JUNIOR_SILVA_DOCKER_RAG_BASE_URL:-http://rag-chat-server-legal-search-api-1:8123}
-      DRAFTER_BASE_URL: ${JUNIOR_SILVA_DOCKER_DRAFTER_BASE_URL:-http://drafter-weeramantry:8033}
-      TRANSLATOR_BASE_URL: ${TRANSLATOR_BASE_URL:-https://www.devtranslate.paralegal.lk/api}
-      JUNIOR_SILVA_KB_ROOT: /kb
-      JS_NATIVE_DEV: "1"
-    command: ["node", "junior-silva/cli/docker-cli.mjs"]
-    stdin_open: true
-    tty: true
+      JS_RUNNER_SECRET: ${JS_RUNNER_SECRET:?Set JS_RUNNER_SECRET in .env}
+      JS_HOST_DATA_ROOT: ${JS_HOST_DATA_ROOT:?Set JS_HOST_DATA_ROOT in .env}
+      JS_BRIDGE_CONTAINER: junior-silva-v2
+      JS_GATEWAY_PORT: ${JS_GATEWAY_PORT:-8127}
+      JS_SLOTS: ${JS_SLOTS:-3}
+    user: "1000:1000"
+    # The Docker group, so it can use docker.sock without being root.
+    group_add:
+      - ${JS_DOCKER_GID:?Set JS_DOCKER_GID in .env}
     volumes:
-      - junior_silva_v2_data:/data
-      - ./junior-silva/artifacts:/data/artifacts
-      - ./junior-silva/uploads:/data/uploads
-
-      - ./junior-silva/workspace:/data/workspace
-      - ./junior-silva/sessions:/data/sessions
-      - ./junior-silva/pi-agent:/data/pi-agent
-      - ${JUNIOR_SILVA_KB_HOST_PATH:-./junior-silva/empty-kb}:/kb:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     networks:
-      - librechat
-      - rag
+      - js-control
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
     security_opt:
       - no-new-privileges:true
+    mem_limit: 256m
+    memswap_limit: 256m
 
-volumes:
-  junior_silva_v2_data:
+  # Not a running service: the runner starts one container per message from this image, and removes
+  # it afterwards. Compose only builds it, and only when asked: docker compose build junior-silva-pi
+  junior-silva-pi:
+    profiles: ["pi-image"]
+    build:
+      context: .
+      target: pi-sandbox
+    image: junior-silva-pi:local
 
 networks:
   librechat:
@@ -91,3 +114,7 @@ networks:
   rag:
     external: true
     name: ${RAG_NETWORK:-rag-chat-server_default}
+  # The bridge and the runner only, with no internet.
+  js-control:
+    name: js-control
+    internal: true

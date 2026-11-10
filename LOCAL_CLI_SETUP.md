@@ -184,19 +184,22 @@ Use Docker mode instead if you do not want these packages installed on the host.
 
 ### Docker CLI and local endpoint
 
-Docker mode builds the Junior Silva V2 image, creates the named external networks required by Compose if missing, starts the local OpenAI-compatible endpoint, and optionally opens the interactive Docker CLI.
+Docker mode builds the bridge, runner and Pi images, creates the named external networks required by Compose if missing, starts the local OpenAI-compatible endpoint (the bridge and the runner), and optionally opens the interactive Docker CLI. The runner starts each message's Pi in its own gVisor container, so Docker needs gVisor: install it with `scripts/js-install-gvisor.sh`.
 
-Before Docker mode, set these endpoint secrets in `.env`:
+Before Docker mode, set these in `.env`:
 
 ```dotenv
 JUNIOR_SILVA_API_KEY=GENERATE_A_LONG_RANDOM_VALUE
 JUNIOR_SILVA_ARTIFACT_SECRET=GENERATE_A_SECOND_LONG_RANDOM_VALUE
 JS_IDENTITY_SECRET=GENERATE_A_THIRD_LONG_RANDOM_VALUE
+JS_RUNNER_SECRET=GENERATE_A_FOURTH_LONG_RANDOM_VALUE
+JS_HOST_DATA_ROOT=/absolute/host/folder/for/chats
+JS_DOCKER_GID=THE_DOCKER_GROUP_NUMBER
 ```
 
-The endpoint won't start without `JS_IDENTITY_SECRET`. Chat folder names are built from it, so don't change it after go-live, or chats lose their folders.
+Generate each secret with `openssl rand -hex 32`. The endpoint won't start without `JS_IDENTITY_SECRET`. Chat folder names are built from it, so don't change it after go-live, or chats lose their folders. `JS_HOST_DATA_ROOT` holds every chat's folders: keep it outside the repository, with mode 700 and owned by user 1000. The Linux setup script creates it if it's missing. Find `JS_DOCKER_GID` with `getent group docker | cut -d: -f3`.
 
-Windows:
+Windows: the Windows setup script's Docker mode isn't updated for the runner yet, and Docker Desktop has no gVisor. Use the native CLI on Windows for now.
 
 ```powershell
 .\Setup-JuniorSilvaV2.ps1 -Mode Docker
@@ -231,13 +234,13 @@ Native CLI does not reinstall or rebuild anything on a normal startup:
 ./Start-JuniorSilvaV2.sh
 ```
 
-Docker CLI reuses the cached `junior-silva-v2:local` image and does not rebuild during a normal interactive launch:
+Docker CLI reuses the cached `junior-silva-v2:local` image and does not rebuild during a normal interactive launch. It's for one developer on their own machine: it runs Pi with every key and no sandbox, so it's in a separate Compose file that a server never uses:
 
 ```bash
-docker compose --profile cli run --rm junior-silva-cli
+docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile cli run --rm junior-silva-cli
 ```
 
-After pulling Pi/Junior Silva source changes, rerun setup without `--skip-build`: native mode rebuilds the Node bundles, while Docker mode rebuilds the V2 image. Only use `--skip-build` when the source and dependencies are unchanged.
+After pulling Pi/Junior Silva source changes, rerun setup without `--skip-build`: native mode rebuilds the Node bundles, while Docker mode rebuilds the bridge, runner and Pi images. Only use `--skip-build` when the source and dependencies are unchanged.
 
 ## 4. Manual alternative (Optional: If Fast automated setup scripts are not used) 
 
@@ -268,10 +271,12 @@ npm --prefix junior-silva ci --omit=dev --ignore-scripts
 ```bash
 docker network inspect librechat_default >/dev/null 2>&1 || docker network create librechat_default
 docker network inspect rag-chat-server_default >/dev/null 2>&1 || docker network create rag-chat-server_default
-docker compose build junior-silva-v2
-docker compose up -d junior-silva-v2
+mkdir -p -m 700 /absolute/host/folder/for/chats    # the JS_HOST_DATA_ROOT folder, as user 1000
+docker compose build                                # the bridge and the runner
+docker compose build junior-silva-pi                # the Pi image; the first build is slow
+docker compose up -d
 curl http://127.0.0.1:8132/health
-docker compose --profile cli run --rm junior-silva-cli
+docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile cli run --rm junior-silva-cli
 ```
 
 ## 5. First-run checks

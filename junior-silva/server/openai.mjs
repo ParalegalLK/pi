@@ -44,20 +44,6 @@ const PI_MODEL = env("PI_MODEL");
 // Pi fills in $JS_RUN_TOKEN from its own settings when it calls the model, so the token is never
 // written to disk. The proxy swaps it for the real key.
 const PI_MODELS_SETTINGS = `${JSON.stringify({ providers: { anthropic: { baseUrl: `http://${LOCAL_PI_ADDRESS}:${GATEWAY_PORT}/model/anthropic`, apiKey: "$JS_RUN_TOKEN" } } }, null, 2)}\n`;
-// Hosted mode uses an administrator-owned MCP registration. It does not bypass Pi's
-// project-trust prompt or approve arbitrary project-local code.
-const PI_MCP_SETTINGS = `${JSON.stringify({
-	mcpServers: {
-		"junior-silva-legal": {
-			command: process.execPath,
-			args: [path.join(projectRoot, "junior-silva", "mcp", "launcher.mjs")],
-			cwd: projectRoot,
-			exposure: "direct",
-			timeout: 1200,
-			description: "Independent Sri Lankan legal research, native source-anchored review, native drafting, and translation tools.",
-		},
-	},
-}, null, 2)}\n`;
 
 function json(res, status, value) {
 	const body = JSON.stringify(value);
@@ -455,12 +441,12 @@ function agentEnvironment(folders, requestWorkspace, runToken, settingsFolder) {
 }
 
 // A fresh settings folder for each run, so a run can't leave changed settings behind for the next one,
-// which may be another user's. It has no auth.json, so no stored key can outrank the run token.
+// which may be another user's. It has no auth.json, so no stored key can outrank the run token. It has
+// no mcp.json either: Pi takes its tools from the project's .pi/mcp.json, which would win anyway.
 async function createPiSettings() {
 	const folder = await mkdtemp(path.join(RUNS_ROOT, "run-"));
 	await Promise.all([
 		writeFile(path.join(folder, "models.json"), PI_MODELS_SETTINGS, { mode: 0o600 }),
-		writeFile(path.join(folder, "mcp.json"), PI_MCP_SETTINGS, { mode: 0o600 }),
 		...["settings.json", "models-store.json"].map((name) => copyFile(path.join(AGENT_ROOT, name), path.join(folder, name)).catch(() => {})),
 	]);
 	return folder;

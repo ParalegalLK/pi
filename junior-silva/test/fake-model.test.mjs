@@ -162,7 +162,8 @@ test("during a run, real Pi holds no model key, and its own settings folder poin
 		// Pi creates an empty auth.json when it starts. It must hold no stored key, which would outrank the token.
 		const auth = existsSync(path.join(folder, "auth.json")) ? JSON.parse(readFileSync(path.join(folder, "auth.json"), "utf8")) : {};
 		assert.deepEqual(auth, {});
-		assert.equal(existsSync(path.join(folder, "mcp.json")), true);
+		// Pi takes its tools from the project's .pi/mcp.json, so the run's folder needs none.
+		assert.equal(existsSync(path.join(folder, "mcp.json")), false);
 	} finally {
 		controller.abort();
 		await reply;
