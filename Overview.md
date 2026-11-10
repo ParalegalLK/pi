@@ -129,6 +129,7 @@ pi/
 │       ├── native-review.test.mjs            document-set, anchors and review rendering tests
 │       ├── time.test.mjs                    Colombo temporal-context tests
 │       ├── typesense-legal-sources.test.mjs direct-source contract tests
+│       ├── isolation/                       the isolation check's probe, attack model and image scan (scripts/js-isolation-check.sh)
 │       └── fixtures/                        non-sensitive test fixtures
 ├── .dockerignore                            keeps secrets/runtime data out of Docker context
 ├── .env                                     local/server secrets; ignored by Git
