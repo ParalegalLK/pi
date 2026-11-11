@@ -8,6 +8,8 @@ export const RUN_LABEL = "js.run=1";
 const HASH = /^[0-9a-f]{32}$/;
 const REQUEST_ID = /^chatcmpl-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const MODEL = /^[a-z0-9][a-z0-9.-]{0,63}$/;
+// The providers the bridge's model proxy has a route for (task/plan.md 3.8).
+const PROVIDERS = new Set(["anthropic", "google"]);
 // Pi's own list (packages/coding-agent/src/cli/args.ts, VALID_THINKING_LEVELS).
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 // An absolute path of plain characters. No commas, because Docker's --mount syntax splits on them.
@@ -22,10 +24,10 @@ export function containerName(requestId) {
 	return `js-run-${requestId}`;
 }
 
-// run: { requestId, userHash, chatHash, slot, model, thinking? }
+// run: { requestId, userHash, chatHash, slot, provider, model, thinking? }
 // settings: { hostDataRoot, image, slots, gatewayPort }
 export function piRunArgs(run, settings) {
-	const { requestId, userHash, chatHash, slot, model, thinking } = run;
+	const { requestId, userHash, chatHash, slot, provider, model, thinking } = run;
 	const { hostDataRoot, image, slots, gatewayPort } = settings;
 	check(Number.isInteger(slots) && slots >= 1 && slots <= 254, "The slot count must be a whole number from 1 to 254");
 	check(Number.isInteger(gatewayPort) && gatewayPort >= 1 && gatewayPort <= 65535, "The gateway port must be from 1 to 65535");
@@ -35,6 +37,7 @@ export function piRunArgs(run, settings) {
 	check(typeof userHash === "string" && HASH.test(userHash), "userHash must be 32 hex characters");
 	check(typeof chatHash === "string" && HASH.test(chatHash), "chatHash must be 32 hex characters");
 	check(Number.isInteger(slot) && slot >= 1 && slot <= slots, `slot must be a whole number from 1 to ${slots}`);
+	check(PROVIDERS.has(provider), `provider must be ${[...PROVIDERS].join(" or ")}`);
 	check(typeof model === "string" && MODEL.test(model), "model must be a plain model name");
 	check(thinking === undefined || THINKING_LEVELS.has(thinking), "thinking must be one of Pi's thinking levels");
 
@@ -65,7 +68,7 @@ export function piRunArgs(run, settings) {
 		"-e", `JS_REQUEST_ID=${requestId}`,
 		image,
 		"--mode", "json", "--approve", "--session-id", `junior-silva-v2-${chatHash}`,
-		"--provider", "anthropic", "--model", model,
+		"--provider", provider, "--model", model,
 	];
 	if (thinking !== undefined) args.push("--thinking", thinking);
 	return args;

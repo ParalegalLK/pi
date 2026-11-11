@@ -11,6 +11,9 @@ const serverPath = fileURLToPath(new URL("../../server/openai.mjs", import.meta.
 // Stands in for the real Anthropic key, which only the bridge's model proxy holds.
 export const PROXY_REAL_KEY = "real-key-for-tests";
 export const TEST_MODEL = "claude-sonnet-5-5";
+export const GEMINI_TEST_MODEL = "gemini-3.8-flash";
+// The settings that run the test bridge with Gemini instead of Claude (P3.17).
+export const GEMINI_SETTINGS = { PI_PROVIDER: "google", PI_MODEL: GEMINI_TEST_MODEL, GEMINI_API_KEY: PROXY_REAL_KEY, ANTHROPIC_API_KEY: "" };
 const API_KEY = "test-junior-silva-key";
 const USER = "aaaaaaaaaaaaaaaaaaaaaa40";
 

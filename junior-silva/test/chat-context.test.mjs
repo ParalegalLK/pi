@@ -308,9 +308,10 @@ test("the bridge refuses to start with the native setting", async (t) => {
 
 test("the bridge refuses to start without a model setup its proxy can check", async (t) => {
 	for (const [label, overrides, expected] of [
-		["another provider", { PI_PROVIDER: "google" }, /PI_PROVIDER must be anthropic/],
+		["a provider the proxy has no route for", { PI_PROVIDER: "openai" }, /PI_PROVIDER must be anthropic or google/],
 		["no model", { PI_MODEL: "" }, /PI_MODEL is not configured/],
 		["no Anthropic key", { ANTHROPIC_API_KEY: "" }, /ANTHROPIC_API_KEY is not configured/],
+		["Google with no Gemini key", { PI_PROVIDER: "google", PI_MODEL: "gemini-3.8-flash", GEMINI_API_KEY: "" }, /GEMINI_API_KEY is not configured/],
 	]) {
 		const { child } = await startServer(t, overrides);
 		let stderr = "";

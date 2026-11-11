@@ -1,6 +1,8 @@
-// Test only: a pretend Anthropic Messages API. It follows a script instead of thinking, records every
-// request it gets, and costs nothing. Real Pi, and later the model proxy, talk to it as to Anthropic.
-// The stream format comes from the P0 spike (scripts/spike/fake-bridge.mjs), which real Pi accepted.
+// Test only: a pretend Anthropic Messages API, and a pretend Gemini API (P3.17). It follows a script instead
+// of thinking, records every request it gets, and costs nothing. Real Pi, and the model proxy, talk to it as
+// to Anthropic on /v1/messages, and as to Gemini on /models/<model>:streamGenerateContent. The Anthropic stream
+// format comes from the P0 spike (scripts/spike/fake-bridge.mjs), and the Gemini one from Pi's captured calls,
+// both of which real Pi accepted.
 //
 // Script steps, one per model call:
 //   { text }                  a normal answer
@@ -21,10 +23,25 @@ function sseEvent(res, type, data) {
 	res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
 }
 
-// Pi lists MCP tools under their own names, or with a server prefix such as "server__name".
+// Pi lists MCP tools under their own names, or with a server prefix such as "server__name". Anthropic's
+// format lists tools directly, Gemini's inside functionDeclarations.
 function listedToolName(body, wanted) {
-	const names = (Array.isArray(body.tools) ? body.tools : []).map((tool) => tool.name);
+	const tools = Array.isArray(body.tools) ? body.tools : [];
+	const names = tools.flatMap((tool) => (Array.isArray(tool.functionDeclarations) ? tool.functionDeclarations : [tool])).map((tool) => tool.name);
 	return names.find((name) => name === wanted || name.endsWith(`__${wanted}`)) ?? wanted;
+}
+
+// Gemini's path names the model: /models/<model>:streamGenerateContent.
+export const GEMINI_PATH = /^\/models\/([A-Za-z0-9._-]+):streamGenerateContent$/;
+
+// Gemini streams one JSON answer per "data:" line. A tool call is a functionCall part.
+function streamGeminiAnswer(res, body, step, number, model) {
+	res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
+	const parts = [];
+	if (step.text !== undefined) parts.push({ text: step.text });
+	if (step.tool) parts.push({ functionCall: { name: listedToolName(body, step.tool), args: step.input ?? {} } });
+	const chunk = { candidates: [{ content: { role: "model", parts }, finishReason: step.cutOff ? "MAX_TOKENS" : "STOP", index: 0 }], usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1, totalTokenCount: 2 }, modelVersion: model, responseId: `fake_${number}` };
+	res.end(`data: ${JSON.stringify(chunk)}\n\n`);
 }
 
 function streamAnswer(res, body, step, number) {
@@ -74,12 +91,17 @@ export async function startFakeModel({ host = "127.0.0.1", port = 0 } = {}) {
 		requests.push(record);
 		// The caller hung up before the answer was finished, for example after a Stop.
 		res.on("close", () => { if (!res.writableEnded) record.closedEarly = true; });
-		if (req.method !== "POST" || new URL(req.url || "/", "http://fake-model.invalid").pathname !== "/v1/messages" || !body) {
+		const pathname = new URL(req.url || "/", "http://fake-model.invalid").pathname;
+		const gemini = GEMINI_PATH.exec(pathname);
+		if (req.method !== "POST" || (pathname !== "/v1/messages" && !gemini) || !body) {
 			return sendJson(res, 404, { type: "error", error: { type: "not_found_error", message: "Not found" } });
 		}
 		const step = steps.shift() ?? { text: "FAKE-MODEL-HAS-NO-MORE-STEPS" };
 		if (step.hold) return;
-		if (step.status) return sendJson(res, step.status, { type: "error", error: step.error });
+		// An HTTP error in the format of the API that was called: { type, message } for Anthropic, and
+		// { code, message, status } for Gemini.
+		if (step.status) return sendJson(res, step.status, gemini ? { error: step.error } : { type: "error", error: step.error });
+		if (gemini) return streamGeminiAnswer(res, body, step, requests.length, gemini[1]);
 		streamAnswer(res, body, step, requests.length);
 	});
 	await new Promise((resolve, reject) => {

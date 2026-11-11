@@ -64,7 +64,7 @@ if (config.secret.length < 32) refuseToStart("JS_RUNNER_SECRET must be set, with
 if (!config.piSettings.hostDataRoot) refuseToStart("JS_HOST_DATA_ROOT must be set");
 if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(config.bridgeContainer)) refuseToStart("JS_BRIDGE_CONTAINER must be a plain container name");
 try {
-	piRunArgs({ requestId: `chatcmpl-${"0".repeat(8)}-0000-4000-8000-${"0".repeat(12)}`, userHash: "0".repeat(32), chatHash: "0".repeat(32), slot: 1, model: "check" }, config.piSettings);
+	piRunArgs({ requestId: `chatcmpl-${"0".repeat(8)}-0000-4000-8000-${"0".repeat(12)}`, userHash: "0".repeat(32), chatHash: "0".repeat(32), slot: 1, provider: "anthropic", model: "check" }, config.piSettings);
 } catch (error) {
 	refuseToStart(error.message);
 }
@@ -176,12 +176,12 @@ async function health(res) {
 async function startRun(req, res) {
 	const request = await readJson(req);
 	if (request.error) return reply(res, request.status, { error: request.error });
-	const { requestId, userHash, chatHash, slot, runToken, model, thinking, prompt } = request.body ?? {};
+	const { requestId, userHash, chatHash, slot, runToken, provider, model, thinking, prompt } = request.body ?? {};
 	if (typeof runToken !== "string" || !RUN_TOKEN.test(runToken)) return reply(res, 400, { error: "runToken must be 64 hex characters" });
 	if (typeof prompt !== "string" || !prompt) return reply(res, 400, { error: "prompt is required" });
 	let args;
 	try {
-		args = piRunArgs({ requestId, userHash, chatHash, slot, model, thinking }, config.piSettings);
+		args = piRunArgs({ requestId, userHash, chatHash, slot, provider, model, thinking }, config.piSettings);
 	} catch (error) {
 		return reply(res, 400, { error: error.message });
 	}

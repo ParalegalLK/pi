@@ -155,7 +155,8 @@ test("a chat is answered through the runner on a free slot, and the bridge doesn
 	assert.equal(answerOf(reply), "The answer from Pi's container.");
 	const [run] = runner.runs;
 	assert.equal(run.authorization, `Bearer ${RUNNER_SECRET}`);
-	assert.deepEqual(Object.keys(run.body).sort(), ["chatHash", "model", "prompt", "requestId", "runToken", "slot", "userHash"]);
+	assert.deepEqual(Object.keys(run.body).sort(), ["chatHash", "model", "prompt", "provider", "requestId", "runToken", "slot", "userHash"]);
+	assert.equal(run.body.provider, "anthropic");
 	assert.equal(run.body.requestId, reply.body.id, "the run uses the message's own ID");
 	assert.match(run.body.userHash, /^[0-9a-f]{32}$/);
 	assert.match(run.body.chatHash, /^[0-9a-f]{32}$/);

@@ -1,6 +1,6 @@
 # Isolation check only (scripts/js-isolation-check.sh), used together with docker-compose.yml. While the
-# check runs, the bridge's model proxy talks to the attack model (attack-model.mjs) instead of Anthropic,
-# with a test key, so no real model is used and the real key never leaves the bridge. Download links last
+# check runs, the bridge's model proxy talks to the attack model (attack-model.mjs) instead of Anthropic or
+# Google, with a test key for each, so no real model is used and the real keys never leave the bridge. Download links last
 # 30 seconds, so the expiry test doesn't have to wait days. The check puts the normal settings back when
 # it ends; if it can't, run `docker compose up -d` in pi/.
 services:
@@ -8,4 +8,5 @@ services:
     environment:
       JS_MODEL_UPSTREAM: http://js-check-model:9100
       ANTHROPIC_API_KEY: isolation-check-test-key-not-real
+      GEMINI_API_KEY: isolation-check-test-key-not-real
       JS_LINK_TTL_HOURS: "0.0084"

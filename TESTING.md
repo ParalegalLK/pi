@@ -53,6 +53,7 @@ Run the focused tests for the feature changed in the current work first. Do not 
 - On a shared server it matters most that Pi can't reach the server's other services. So from a slot, it tries every TCP port the host listens on, on each of the host's addresses (P7.8). Ports open only to the host's own loopback are left out, because a container can't reach them. Its control is that they answer from the host itself. Any the host itself can't connect to, often because of its own firewall, are listed as proving nothing.
 - Direct probes run a script inside a real Pi container, started with the runner's own Docker settings but without Pi, because Pi's guard would block some attacks first and hide a weak wall.
 - Full-chain tests run real Pi through the real bridge and runner, with the stand-in model scripting the attacks. Each one first proves the attack really ran.
+- It runs with the provider the stack is set to, Anthropic or Google (`PI_PROVIDER`). The stand-in model answers in that provider's format, and the crafted model calls use that provider's form: for Google, `fileData`, `googleSearch`, `urlContext`, `codeExecution` and `cachedContent`. A call to the other provider's route must get 404. To prove both, run it once with each.
 - Every wall test has a positive control, such as user A's file being on disk while B tries to read it. A failed control counts as a failure.
 
 Then, by hand in LibreChat with two accounts:

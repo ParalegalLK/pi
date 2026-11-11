@@ -20,7 +20,7 @@ const USER_B = "b".repeat(32);
 const TOKEN = "f".repeat(64);
 
 function runBody(changes = {}) {
-	return { requestId: `chatcmpl-${randomUUID()}`, userHash: USER_A, chatHash: "c".repeat(32), slot: 1, runToken: TOKEN, model: "claude-opus-5-5", prompt: "ok: hello", ...changes };
+	return { requestId: `chatcmpl-${randomUUID()}`, userHash: USER_A, chatHash: "c".repeat(32), slot: 1, runToken: TOKEN, provider: "anthropic", model: "claude-opus-5-5", prompt: "ok: hello", ...changes };
 }
 
 async function until(check, ms = 5_000) {
@@ -169,6 +169,8 @@ test("a bad field is refused before Docker is touched", async (t) => {
 		{ slot: "1" },
 		{ runToken: "short" },
 		{ runToken: undefined },
+		{ provider: undefined },
+		{ provider: "openai" },
 		{ model: "a b" },
 		{ thinking: "huge" },
 		{ prompt: "" },

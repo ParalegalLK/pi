@@ -7,7 +7,7 @@ import { piRunArgs } from "../runner/docker-args.mjs";
 import { BUSY_TEXT, createSlotPool, piAddress, startContainerPi, startLocalPi } from "../server/pi-executor.mjs";
 
 const SECRET = "runner-test-secret-0123456789abcdef0123";
-const RUN = { requestId: `chatcmpl-${randomUUID()}`, userHash: "a".repeat(32), chatHash: "c".repeat(32), slot: 2, runToken: "f".repeat(64), model: "claude-sonnet-5-5" };
+const RUN = { requestId: `chatcmpl-${randomUUID()}`, userHash: "a".repeat(32), chatHash: "c".repeat(32), slot: 2, runToken: "f".repeat(64), provider: "anthropic", model: "claude-sonnet-5-5" };
 
 async function until(check, ms = 5_000) {
 	const deadline = Date.now() + ms;

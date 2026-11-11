@@ -182,6 +182,14 @@ SLOTS="$(inspect "$RUNNER" '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 
 GATEWAY_PORT="$(inspect "$RUNNER" '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^JS_GATEWAY_PORT=//p')"
 PI_IMAGE="$(inspect "$RUNNER" '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^JS_PI_IMAGE=//p')"
 SLOTS="${SLOTS:-3}"; GATEWAY_PORT="${GATEWAY_PORT:-8127}"; PI_IMAGE="${PI_IMAGE:-junior-silva-pi:local}"
+# The model provider the stack runs with (P3.17). The attack model and its crafted calls follow it.
+PROVIDER="$(inspect "$BRIDGE" '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^PI_PROVIDER=//p' | tail -n 1)"; PROVIDER="${PROVIDER:-anthropic}"
+# With Google, the two proxy rows prove the tracker's "Model proxy (Google)" row.
+if [ "$PROVIDER" = google ]; then
+	ROW_LABEL[proxy-calls]="Model proxy (Google): No token, other model, other method or path, oversized body, over budget"
+	ROW_LABEL[proxy-content]="Model proxy (Google): Google's server tools, fileData, cachedContent"
+fi
+MODEL="$(inspect "$BRIDGE" '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^PI_MODEL=//p' | tail -n 1)"
 DATA_ROOT="$(inspect "$BRIDGE" '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}')"
 PUBLIC_URL="http://$(docker port "$BRIDGE" 8126/tcp 2>/dev/null | head -n 1)"
 LIBRECHAT_NETWORK="$(env_plain LIBRECHAT_NETWORK)"; LIBRECHAT_NETWORK="${LIBRECHAT_NETWORK:-librechat_default}"
@@ -202,7 +210,7 @@ PROBE_A="ffffffffffffffffffffffff1500000a"; PROBE_B="ffffffffffffffffffffffff150
 PROBE_CHAT_A="ffffffffffffffffffffffff1500000c"; PROBE_CHAT_B="ffffffffffffffffffffffff1500000d"
 CHAIN_USERS=("$(hex 12)" "$(hex 12)")
 USER_A="${CHAIN_USERS[0]}"; USER_B="${CHAIN_USERS[1]}"
-record INFO settings "stack: $SLOTS slots, gateway port $GATEWAY_PORT, Pi image $PI_IMAGE, public address $PUBLIC_URL, check $RUN_ID"
+record INFO settings "stack: $SLOTS slots, gateway port $GATEWAY_PORT, Pi image $PI_IMAGE, model $PROVIDER $MODEL, public address $PUBLIC_URL, check $RUN_ID"
 
 check_settings() { # check_settings <label>
 	echo "=== $1"
@@ -379,9 +387,11 @@ status="$(chat "$WORK/b3.json" "$USER_B" "iso-$RUN_ID-b3" "ISO-PROXY $(mark b3) 
 proxy_result="$(tool_result "$(mark b3)" 0)"
 case_status() { printf '%s\n' "$proxy_result" | sed -n "s/^CASE=$1 STATUS=\([^ ]*\).*/\1/p" | head -n 1; }
 check proxy-calls "control: B's own token works for a plain model call" 200 "$(case_status valid)"
-check proxy-calls "no token, a wrong token, another model, another route, a body over 32 MB: refused" "401 401 400 404 413" "$(case_status no-token) $(case_status wrong-token) $(case_status other-model) $(case_status other-route) $(case_status oversized)"
+check proxy-calls "no token, a wrong token, another model, another route, the other provider's route, a body over 32 MB: refused" "401 401 400 404 404 413" "$(case_status no-token) $(case_status wrong-token) $(case_status other-model) $(case_status other-route) $(case_status other-provider) $(case_status oversized)"
 record LATER proxy-calls "over budget: the per-run budget is on the later list"
-check proxy-content "a URL image, a web search tool, a web fetch tool, mcp_servers, fallbacks: refused" "400 400 400 400 400" "$(case_status url-image) $(case_status web-search) $(case_status web-fetch) $(case_status mcp-servers) $(case_status fallbacks)"
+# The same five attacks in each provider's own form (attack-model.mjs).
+if [ "$PROVIDER" = google ]; then content_attacks="fileData, a googleSearch tool, a urlContext tool, a codeExecution tool, cachedContent"; else content_attacks="a URL image, a web search tool, a web fetch tool, mcp_servers, fallbacks"; fi
+check proxy-content "$content_attacks: refused" "400 400 400 400 400" "$(case_status url-image) $(case_status web-search) $(case_status web-fetch) $(case_status mcp-servers) $(case_status fallbacks)"
 check proxy-errors "an upstream error that repeats the key reaches Pi with the key removed" "401 yes" "$(case_status echo-key) $(printf '%s\n' "$proxy_result" | grep '^CASE=echo-key' | grep -qF '[removed]' && echo yes || echo no)"
 check proxy-errors "no reply to B's calls contains the bridge's key" no "$(python3 -I -c 'import sys
 text = sys.stdin.read()

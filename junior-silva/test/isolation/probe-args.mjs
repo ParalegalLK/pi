@@ -11,7 +11,7 @@
 import { piRunArgs } from "../../runner/docker-args.mjs";
 
 const input = JSON.parse(process.argv[2]);
-const args = piRunArgs({ requestId: input.requestId, userHash: input.userHash, chatHash: input.chatHash, slot: input.slot, model: "isolation-check" }, input.settings);
+const args = piRunArgs({ requestId: input.requestId, userHash: input.userHash, chatHash: input.chatHash, slot: input.slot, provider: "anthropic", model: "isolation-check" }, input.settings);
 const nameAt = args.indexOf("--name");
 const labelAt = args.indexOf("--label");
 const imageAt = args.lastIndexOf(input.settings.image);

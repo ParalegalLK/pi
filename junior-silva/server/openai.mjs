@@ -10,6 +10,7 @@ import { artifactsRoot, env, projectRoot, requiredEnv } from "../core/environmen
 import { mimeType, publishWorkspaceArtifact, resolveArtifactRequest, safeFilename } from "../core/files.mjs";
 import { newestRequestedArtifact, requestedSlideCount } from "../core/artifact-delivery.mjs";
 import { arrivedOnPiNetwork, GATEWAY_PORT, startGateway } from "./gateway.mjs";
+import { MODEL_PROVIDERS } from "./model-proxy.mjs";
 import { createSlotPool, piAddress, startContainerPi, startLocalPi } from "./pi-executor.mjs";
 import { bearerToken, createRunToken, revokeRunToken } from "./run-tokens.mjs";
 import { addAssistantUsage, createUsageTotals, openAiUsage, requestsStreamUsage } from "./usage.mjs";
@@ -39,11 +40,13 @@ let slotPool;
 const LOCAL_PI_ADDRESS = "127.0.0.1";
 // Each run gets its own settings folder in here, removed when the run ends.
 const RUNS_ROOT = path.join(path.dirname(artifactsRoot), "pi-runs");
-// Pi's model calls go through the bridge's model proxy, which has an Anthropic route only.
+// Pi's model calls go through the bridge's model proxy, which has a route for each of these providers.
+const PI_PROVIDER = env("PI_PROVIDER", "anthropic");
 const PI_MODEL = env("PI_MODEL");
 // Pi fills in $JS_RUN_TOKEN from its own settings when it calls the model, so the token is never
-// written to disk. The proxy swaps it for the real key.
-const PI_MODELS_SETTINGS = `${JSON.stringify({ providers: { anthropic: { baseUrl: `http://${LOCAL_PI_ADDRESS}:${GATEWAY_PORT}/model/anthropic`, apiKey: "$JS_RUN_TOKEN" } } }, null, 2)}\n`;
+// written to disk. The proxy swaps it for the real key. Both providers point at the proxy, which keeps
+// all but PI_PROVIDER's route closed.
+const PI_MODELS_SETTINGS = `${JSON.stringify({ providers: Object.fromEntries(Object.keys(MODEL_PROVIDERS).map((provider) => [provider, { baseUrl: `http://${LOCAL_PI_ADDRESS}:${GATEWAY_PORT}/model/${provider}`, apiKey: "$JS_RUN_TOKEN" }])) }, null, 2)}\n`;
 
 function json(res, status, value) {
 	const body = JSON.stringify(value);
@@ -527,7 +530,7 @@ function localPiArgs(sessionId) {
 		"--extension", path.join(projectRoot, ".pi", "extensions", "legal-research-citation-delivery.ts"),
 		"--extension", path.join(projectRoot, ".pi", "extensions", "librechat-preview-delivery.ts"),
 	];
-	args.push("--provider", "anthropic", "--model", PI_MODEL);
+	args.push("--provider", PI_PROVIDER, "--model", PI_MODEL);
 	if (env("PI_THINKING")) args.push("--thinking", env("PI_THINKING"));
 	return args;
 }
@@ -554,7 +557,7 @@ async function startPi({ requestId, requestWorkspace, sessionId, chat, prompt, t
 	cleanUps.push(() => revokeRunToken(runToken));
 	signal.throwIfAborted();
 	const thinking = env("PI_THINKING");
-	const run = { requestId, userHash: chat.userHash, chatHash: chat.chatHash, slot, runToken, model: PI_MODEL, ...(thinking ? { thinking } : {}) };
+	const run = { requestId, userHash: chat.userHash, chatHash: chat.chatHash, slot, runToken, provider: PI_PROVIDER, model: PI_MODEL, ...(thinking ? { thinking } : {}) };
 	return { runToken, pi: startContainerPi({ runnerUrl: RUNNER_URL, runnerSecret: RUNNER_SECRET, run, prompt }) };
 }
 
@@ -784,10 +787,11 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
 requiredEnv("JS_IDENTITY_SECRET");
 requiredEnv("JUNIOR_SILVA_ARTIFACT_SECRET");
 if (env("JS_NATIVE_DEV")) throw new Error("JS_NATIVE_DEV is only for the native CLI. Remove it from the bridge's settings.");
-// Pi's model calls go through the model proxy, which has an Anthropic route only (task/plan.md 3.8).
-if (env("PI_PROVIDER", "anthropic") !== "anthropic") throw new Error("PI_PROVIDER must be anthropic. Pi's model calls go through the bridge's model proxy, which has no route for other providers yet.");
+// Pi's model calls go through the model proxy, which has a route for Anthropic and for Google only
+// (task/plan.md 3.8). The proxy holds the provider's real key.
+if (!Object.hasOwn(MODEL_PROVIDERS, PI_PROVIDER)) throw new Error(`PI_PROVIDER must be ${Object.keys(MODEL_PROVIDERS).join(" or ")}. Pi's model calls go through the bridge's model proxy, which has no route for other providers.`);
 requiredEnv("PI_MODEL");
-requiredEnv("ANTHROPIC_API_KEY");
+requiredEnv(MODEL_PROVIDERS[PI_PROVIDER].keySetting);
 if (PI_EXECUTOR !== "container" && PI_EXECUTOR !== "local") throw new Error("JS_PI_EXECUTOR must be container or local.");
 if (PI_EXECUTOR === "local" && env("JS_ALLOW_LOCAL_PI") !== "1") throw new Error("JS_PI_EXECUTOR=local runs Pi inside the bridge, next to its keys and every chat's files, so it's for development only. Set JS_ALLOW_LOCAL_PI=1 to use it anyway.");
 if (PI_EXECUTOR === "container") {

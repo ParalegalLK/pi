@@ -53,7 +53,9 @@ real_folder "$SETTINGS" && [[ -w "$SETTINGS" ]] || refuse "$SETTINGS must be a w
 cp "$SEED/settings.json" "$SEED/auth.json" "$SETTINGS/"
 # The key is the text $JS_RUN_TOKEN, which Pi fills in from its environment for each call, so the
 # token itself is never written to disk.
-printf '{"providers":{"anthropic":{"baseUrl":"%s/model/anthropic","apiKey":"$JS_RUN_TOKEN"}}}\n' "$JS_GATEWAY_URL" > "$SETTINGS/models.json"
+# Both providers point at the bridge, and Pi uses the one the runner names. The bridge's model proxy keeps
+# every route but its own provider's closed.
+printf '{"providers":{"anthropic":{"baseUrl":"%s/model/anthropic","apiKey":"$JS_RUN_TOKEN"},"google":{"baseUrl":"%s/model/google","apiKey":"$JS_RUN_TOKEN"}}}\n' "$JS_GATEWAY_URL" "$JS_GATEWAY_URL" > "$SETTINGS/models.json"
 
 # This message's folder. A link planted here by an earlier run is refused, not followed.
 requests="$JS_CHAT_ROOT/workspace/requests"

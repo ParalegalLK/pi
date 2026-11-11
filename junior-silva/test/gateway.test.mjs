@@ -12,7 +12,7 @@ process.env.JUNIOR_SILVA_ARTIFACT_ROOT = path.join(dataRoot, "artifacts");
 delete process.env.JS_NATIVE_DEV;
 
 const { createChatFolders } = await import("../core/chat-scope.mjs");
-const { arrivedOnPiNetwork, gatewayAcceptsArrival, GATEWAY_PORT, startGateway } = await import("../server/gateway.mjs");
+const { arrivedOnPiNetwork, gatewayAcceptsArrival, GATEWAY_PORT, modelCallRoute, startGateway } = await import("../server/gateway.mjs");
 const { createRunToken, revokeRunToken } = await import("../server/run-tokens.mjs");
 
 const MINUTE = 60_000;
@@ -198,4 +198,24 @@ test("Pi's network is 10.89.*, and the gateway accepts only that and local calls
 		assert.equal(arrivedOnPiNetwork(address), false, String(address));
 		assert.equal(gatewayAcceptsArrival(address), false, String(address));
 	}
+});
+
+test("a model call is only the route of the provider in use, and Gemini's only for its streaming method", () => {
+	const gemini = "/model/google/models/gemini-3.8-flash:streamGenerateContent?alt=sse";
+	assert.deepEqual(modelCallRoute("POST", "/model/anthropic/v1/messages?beta=true", "anthropic"), { provider: "anthropic" });
+	assert.deepEqual(modelCallRoute("POST", "/model/anthropic/v1/messages", "anthropic"), { provider: "anthropic" });
+	assert.deepEqual(modelCallRoute("POST", gemini, "google"), { provider: "google", pathModel: "gemini-3.8-flash" });
+	const closed = [
+		["POST", gemini, "anthropic"],
+		["POST", "/model/anthropic/v1/messages?beta=true", "google"],
+		["GET", gemini, "google"],
+		["POST", "/model/google/models/gemini-3.8-flash:generateContent", "google"],
+		["POST", "/model/google/models/gemini-3.8-flash:streamGenerateContent", "google"],
+		["POST", "/model/google/models/gemini-3.8-flash:streamGenerateContent?alt=sse&key=x", "google"],
+		["POST", "/model/google/models/a/b:streamGenerateContent?alt=sse", "google"],
+		["POST", "/model/google/files", "google"],
+		["POST", "/model/anthropic/v1/messages?beta=true", undefined],
+		["POST", gemini, "openai"],
+	];
+	for (const [method, url, provider] of closed) assert.equal(modelCallRoute(method, url, provider), undefined, `${method} ${url} (${provider})`);
 });

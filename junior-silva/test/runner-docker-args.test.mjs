@@ -5,7 +5,7 @@ import { containerName, piRunArgs, RUN_LABEL } from "../runner/docker-args.mjs";
 const USER = "a".repeat(32);
 const CHAT = "b".repeat(32);
 const REQUEST = "chatcmpl-12345678-9abc-4def-8123-456789abcdef";
-const RUN = { requestId: REQUEST, userHash: USER, chatHash: CHAT, slot: 2, model: "claude-opus-5-5" };
+const RUN = { requestId: REQUEST, userHash: USER, chatHash: CHAT, slot: 2, provider: "anthropic", model: "claude-opus-5-5" };
 const SETTINGS = { hostDataRoot: "/srv/js/data", image: "junior-silva-pi:local", slots: 3, gatewayPort: 8127 };
 
 test("the Docker settings for a Pi run are exactly the plan's", () => {
@@ -46,6 +46,12 @@ test("the run token only ever comes from the environment, never as a value on th
 	assert.ok(!args.some((arg) => /JS_RUN_TOKEN=/.test(arg)));
 });
 
+test("Pi gets the provider the bridge names: Gemini runs the same way as Claude", () => {
+	const args = piRunArgs({ ...RUN, provider: "google", model: "gemini-3.8-flash" }, SETTINGS);
+	assert.deepEqual(args.slice(-4), ["--provider", "google", "--model", "gemini-3.8-flash"]);
+	assert.deepEqual(args.slice(0, -4), piRunArgs(RUN, SETTINGS).slice(0, -4));
+});
+
 test("a thinking level is passed on only when one is set", () => {
 	assert.ok(!piRunArgs(RUN, SETTINGS).includes("--thinking"));
 	assert.deepEqual(piRunArgs({ ...RUN, thinking: "high" }, SETTINGS).slice(-2), ["--thinking", "high"]);
@@ -73,6 +79,9 @@ test("each bad input is refused, so nothing unchecked reaches Docker", () => {
 		[{ ...RUN, slot: 4 }, SETTINGS],
 		[{ ...RUN, slot: 1.5 }, SETTINGS],
 		[{ ...RUN, slot: "1" }, SETTINGS],
+		[{ ...RUN, provider: undefined }, SETTINGS],
+		[{ ...RUN, provider: "openai" }, SETTINGS],
+		[{ ...RUN, provider: "google --privileged" }, SETTINGS],
 		[{ ...RUN, model: "claude --privileged" }, SETTINGS],
 		[{ ...RUN, model: "" }, SETTINGS],
 		[{ ...RUN, thinking: "huge" }, SETTINGS],

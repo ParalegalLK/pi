@@ -3,7 +3,7 @@ import { after, before, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { ask, askStreaming, piProcesses, processSettings, PROXY_REAL_KEY, send, startBridgeWithFakeModel, TEST_MODEL } from "./fake-model/bridge.mjs";
+import { ask, askStreaming, GEMINI_SETTINGS, GEMINI_TEST_MODEL, piProcesses, processSettings, PROXY_REAL_KEY, send, startBridgeWithFakeModel, TEST_MODEL } from "./fake-model/bridge.mjs";
 import { startFakeModel } from "./fake-model/server.mjs";
 
 let fake;
@@ -62,6 +62,36 @@ test("the fake model streams answers, tool calls and cut-offs the way Anthropic 
 		assert.equal(own.requests[0].path, "/v1/messages?beta=true");
 		assert.equal(own.requests[0].headers["x-api-key"], "unit-test-key");
 		assert.equal(own.requests[0].body.model, "test-model");
+	} finally {
+		await own.close();
+	}
+});
+
+test("the fake model streams answers, tool calls and cut-offs the way Gemini does, on Gemini's path", async () => {
+	const own = await startFakeModel();
+	try {
+		own.script([{ text: "Hello" }, { tool: "legal_validate_draft", input: { file_path: "/x.md" } }, { text: "Long", cutOff: true }, { status: 400, error: { code: 400, message: "API key not valid", status: "INVALID_ARGUMENT" } }]);
+		const call = async (body) => {
+			const response = await fetch(`${own.url}/models/${GEMINI_TEST_MODEL}:streamGenerateContent?alt=sse`, { method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": "unit-test-key" }, body: JSON.stringify(body) });
+			const text = await response.text();
+			return { status: response.status, chunks: [...text.matchAll(/^data: (.+)$/gm)].map((match) => JSON.parse(match[1])), text };
+		};
+		const answer = await call({ contents: [] });
+		assert.equal(answer.status, 200);
+		assert.deepEqual(answer.chunks[0].candidates[0].content, { role: "model", parts: [{ text: "Hello" }] });
+		assert.equal(answer.chunks[0].candidates[0].finishReason, "STOP");
+		assert.equal(answer.chunks[0].modelVersion, GEMINI_TEST_MODEL);
+
+		const toolCall = await call({ contents: [], tools: [{ functionDeclarations: [{ name: "mcp__junior_silva_legal__legal_validate_draft" }] }] });
+		assert.deepEqual(toolCall.chunks[0].candidates[0].content.parts, [{ functionCall: { name: "mcp__junior_silva_legal__legal_validate_draft", args: { file_path: "/x.md" } } }], "matched to the name Pi lists");
+
+		const cutOff = await call({ contents: [] });
+		assert.equal(cutOff.chunks[0].candidates[0].finishReason, "MAX_TOKENS");
+
+		const error = await call({ contents: [] });
+		assert.equal(error.status, 400);
+		assert.deepEqual(JSON.parse(error.text), { error: { code: 400, message: "API key not valid", status: "INVALID_ARGUMENT" } });
+		assert.equal(own.requests[0].headers["x-goog-api-key"], "unit-test-key");
 	} finally {
 		await own.close();
 	}
@@ -158,7 +188,8 @@ test("during a run, real Pi holds no model key, and its own settings folder poin
 		folder = settings.PI_CODING_AGENT_DIR;
 		assert.equal(path.dirname(folder), path.join(bridge.root, "pi-runs"));
 		const models = JSON.parse(readFileSync(path.join(folder, "models.json"), "utf8"));
-		assert.deepEqual(models, { providers: { anthropic: { baseUrl: `http://127.0.0.1:${bridge.port + 1}/model/anthropic`, apiKey: "$JS_RUN_TOKEN" } } });
+		const gateway = `http://127.0.0.1:${bridge.port + 1}`;
+		assert.deepEqual(models, { providers: { anthropic: { baseUrl: `${gateway}/model/anthropic`, apiKey: "$JS_RUN_TOKEN" }, google: { baseUrl: `${gateway}/model/google`, apiKey: "$JS_RUN_TOKEN" } } });
 		// Pi creates an empty auth.json when it starts. It must hold no stored key, which would outrank the token.
 		const auth = existsSync(path.join(folder, "auth.json")) ? JSON.parse(readFileSync(path.join(folder, "auth.json"), "utf8")) : {};
 		assert.deepEqual(auth, {});
@@ -194,4 +225,39 @@ test("with real Pi, Stop while it waits for the model ends the run, and the chat
 	const next = await ask(bridge, chatId, "In one sentence, what is a plaint?");
 	assert.equal(next.status, 200);
 	assert.equal(next.answer, "FAKE-NEXT-ANSWER");
+});
+
+test("with Gemini, real Pi holds no model key, its settings point at the proxy, and a rejected key gives the usual note", async () => {
+	const own = await startFakeModel();
+	const gemini = await startBridgeWithFakeModel(own.url, { environment: GEMINI_SETTINGS });
+	try {
+		own.script([{ hold: true }]);
+		const controller = new AbortController();
+		const reply = send(gemini, newChat(), "What is a plaint?", { stream: true, signal: controller.signal }).catch(() => undefined);
+		try {
+			await waitUntil(() => own.requests.length === 1, 20_000, "Pi to call Gemini");
+			const [pid] = piProcesses(gemini);
+			const settings = processSettings(pid);
+			assert.equal(settings.GEMINI_API_KEY, undefined);
+			assert.equal(settings.ANTHROPIC_API_KEY, undefined);
+			assert.ok(!Object.values(settings).includes(PROXY_REAL_KEY), "the real key isn't anywhere in Pi's settings");
+			const models = JSON.parse(readFileSync(path.join(settings.PI_CODING_AGENT_DIR, "models.json"), "utf8"));
+			assert.equal(models.providers.google.baseUrl, `http://127.0.0.1:${gemini.port + 1}/model/google`);
+			assert.equal(models.providers.google.apiKey, "$JS_RUN_TOKEN");
+			assert.equal(own.requests[0].path, `/models/${GEMINI_TEST_MODEL}:streamGenerateContent?alt=sse`);
+			assert.equal(own.requests[0].headers["x-goog-api-key"], PROXY_REAL_KEY, "the proxy swapped the run token for the real key");
+		} finally {
+			controller.abort();
+			await reply;
+		}
+
+		own.script([{ status: 400, error: { code: 400, message: "API key not valid. Please pass a valid API key.", status: "INVALID_ARGUMENT" } }]);
+		const rejected = await ask(gemini, newChat(), "What is a plaint?");
+		assert.equal(rejected.status, 200);
+		assert.match(rejected.answer, /^\*\*I couldn't finish this answer\.\*\*/);
+		assert.doesNotMatch(rejected.answer, /API key/);
+	} finally {
+		await gemini.close();
+		await own.close();
+	}
 });
