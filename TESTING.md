@@ -62,6 +62,34 @@ Then, by hand in LibreChat with two accounts:
 - [ ] Account B asks for A's document by its exact path in the data folder (the 29 Oct attack). It must fail.
 - [ ] Stop works for both, chat titles appear, and a file Junior Silva made downloads.
 
+## Load test
+
+`scripts/js-load-test.py` measures how many workflows the running stack can handle at once (`task/deployment/plan.md`, M10).
+- **A workflow:** one message sent straight to the bridge, the way LibreChat sends it. It comes from a made-up test user in a new chat, and asks for research and a Word document.
+- **The order:** a baseline (one workflow, three times, one after another), then 2, 3, 5, 7 and 10 at once. After each level, it watches memory recovery for 3 minutes.
+
+- It uses the real model, so every workflow costs money. Run it only when nobody is using the stack.
+- `JS_SLOTS` must be at least the highest level. For the test only:
+  - raise it in `.env`, run `docker compose up -d`, and wait a minute for the runner to make the slots;
+  - put it back afterwards, and remove the extra `js-slot-*` networks.
+- Run it in the background, so Ctrl+C can't cut off its clean-up (MG12):
+  - start it with `nohup scripts/js-load-test.py --yes > ../js-load-test.log 2>&1 &`;
+  - watch it with `tail -f ../js-load-test.log`;
+  - stop it early with `touch ../js-load-test.stop`.
+- `--check-only` runs the checks and 10 seconds of sampling, with no workflows. `--cleanup <results folder>` removes the test users a cut-off run left behind.
+- **Before each level,** it stops if:
+  - free RAM is under 2 GiB, or disk under 3 GB;
+  - the load is at or above the CPU count;
+  - a Pi run is going;
+  - or another container restarted.
+- **During a level,** it hangs up that level's chats if free RAM falls under 1 GiB, swap thrashes, or another container restarts.
+- **Results** go to `../js-load-<time>/`. They hold no chat text and no secrets:
+  - `server.txt`;
+  - `runs.csv`, one row per workflow;
+  - `samples.csv`, every 2 seconds;
+  - `levels.csv`;
+  - `summary.txt`, each level against the stable limits.
+
 # Review clarification/evidence scenarios
 
 Before the broader suite, verify review interaction behavior for a substantive pleading or agreement:
