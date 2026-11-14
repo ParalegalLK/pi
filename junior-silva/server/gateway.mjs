@@ -3,7 +3,7 @@ import { runInChat } from "../core/chat-scope.mjs";
 import { env } from "../core/environment.mjs";
 import { dispatchMcpRequest } from "../mcp/server.mjs";
 import { MODEL_PROVIDERS, providerError, proxyModelCall } from "./model-proxy.mjs";
-import { bearerToken, chatForRunToken, plainAddress } from "./run-tokens.mjs";
+import { bearerToken, plainAddress, runForToken } from "./run-tokens.mjs";
 
 // Pi's own door into the bridge, for its tool calls only. It's never published: LibreChat, browsers
 // and downloads use the public port instead.
@@ -19,13 +19,13 @@ const GOOGLE_ROUTE = /^\/model\/google\/models\/([A-Za-z0-9._-]{1,128}):streamGe
 // The header each provider's client sends its key in. Pi sends its run token there.
 const KEY_HEADERS = { anthropic: "x-api-key", google: "x-goog-api-key" };
 
-// The model call a request is for the provider in use, or undefined. The other provider's route is closed.
-export function modelCallRoute(method, url, provider) {
+// The model call a request is for, with its provider, or undefined. Which provider a run may call is decided
+// by its run token (P3.18): the other provider's route is closed to it.
+export function modelCallRoute(method, url) {
 	if (method !== "POST") return undefined;
-	if (provider === "anthropic") return ANTHROPIC_ROUTES.has(url) ? { provider } : undefined;
-	if (provider !== "google") return undefined;
+	if (ANTHROPIC_ROUTES.has(url)) return { provider: "anthropic" };
 	const match = GOOGLE_ROUTE.exec(String(url));
-	return match ? { provider, pathModel: match[1] } : undefined;
+	return match ? { provider: "google", pathModel: match[1] } : undefined;
 }
 
 // Pi's containers will live on 10.89.<slot>.0/24 networks (P3). The network a connection arrived on
@@ -62,32 +62,35 @@ async function readCall(req) {
 	}
 }
 
-function modelServiceFromSettings() {
-	const provider = env("PI_PROVIDER", "anthropic");
-	const settings = MODEL_PROVIDERS[provider];
-	return { provider, model: env("PI_MODEL"), apiKey: settings ? env(settings.keySetting) : "", upstream: env("JS_MODEL_UPSTREAM", settings?.upstream ?? "") };
+// Each provider's real key, and where its calls go. JS_MODEL_UPSTREAM sends them all to a fake model, in tests.
+function modelServicesFromSettings() {
+	const upstream = env("JS_MODEL_UPSTREAM");
+	return Object.fromEntries(Object.entries(MODEL_PROVIDERS).map(([provider, settings]) => [provider, { apiKey: env(settings.keySetting), upstream: upstream || settings.upstream }]));
 }
 
 // The token is checked before the body is read, so a caller with no token can't make the bridge read a body.
-export function startGateway({ port = GATEWAY_PORT, host = GATEWAY_HOST, dispatch = dispatchMcpRequest, modelService = modelServiceFromSettings() } = {}) {
+export function startGateway({ port = GATEWAY_PORT, host = GATEWAY_HOST, dispatch = dispatchMcpRequest, modelServices = modelServicesFromSettings() } = {}) {
 	const callsRunning = new Map();
-	const provider = modelService.provider ?? "anthropic";
 	const server = createServer(async (req, res) => {
 		try {
 			if (!gatewayAcceptsArrival(req.socket.localAddress)) return reply(res, 403, { error: "Not allowed" });
-			const modelCall = modelCallRoute(req.method, req.url, provider);
+			const modelCall = modelCallRoute(req.method, req.url);
 			if (!modelCall && (req.method !== "POST" || req.url !== "/internal/mcp")) return reply(res, 404, { error: "Not found" });
+			const provider = modelCall?.provider;
 			// Pi sends its run token as a bearer token to the tools, and as the API key to the model.
 			const token = modelCall ? String(req.headers[KEY_HEADERS[provider]] || "") : bearerToken(req);
-			const chat = chatForRunToken(token, req.socket.remoteAddress);
-			if (!chat) return modelCall ? providerError(provider, res, 401, "authentication_error", "A valid run token is required") : reply(res, 401, { error: "A valid run token is required" });
+			const run = runForToken(token, req.socket.remoteAddress);
+			if (!run) return modelCall ? providerError(provider, res, 401, "authentication_error", "A valid run token is required") : reply(res, 401, { error: "A valid run token is required" });
+			// A run may call only the provider it was started with. The other provider's route is closed to it.
+			if (modelCall && run.model?.provider !== provider) return providerError(provider, res, 404, "not_found_error", "Not found");
 			const running = callsRunning.get(token) ?? 0;
 			if (running >= MAX_CALLS_AT_ONCE) return modelCall ? providerError(provider, res, 429, "rate_limit_error", "Too many calls at once") : reply(res, 429, { error: "Too many tool calls at once" });
 			callsRunning.set(token, running + 1);
 			try {
-				if (modelCall) return await proxyModelCall(req, res, { chatHash: chat.chatHash, ...modelService, provider, pathModel: modelCall.pathModel });
+				// The proxy checks the call against this run's own model.
+				if (modelCall) return await proxyModelCall(req, res, { chatHash: run.chat.chatHash, ...modelServices[provider], provider, model: run.model.id, pathModel: modelCall.pathModel });
 				const message = await readCall(req);
-				const response = await runInChat(chat, () => dispatch(message));
+				const response = await runInChat(run.chat, () => dispatch(message));
 				return response ? reply(res, 200, response) : reply(res, 202, {});
 			} finally {
 				const left = callsRunning.get(token) - 1;

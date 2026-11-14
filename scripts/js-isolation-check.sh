@@ -49,6 +49,7 @@ declare -A ROW_LABEL=(
 	[proxy-calls]="Model proxy: No token, other model, other route, oversized body, over budget"
 	[proxy-content]="Model proxy: URL image source, web_fetch, web_search, mcp_servers, fallbacks"
 	[proxy-errors]="Model proxy: Error replies"
+	[model-choice]="Model choice per message: not allowed, or a level the model lacks: 400 before Pi starts"
 	[answer-filter]="Answer filter"
 	[links]="Links"
 	[limits]="Limits"
@@ -59,7 +60,7 @@ declare -A ROW_LABEL=(
 	[browser]="Browser: two accounts, and the 29 Oct attack"
 	[functional]="Functional: TESTING.md in full"
 )
-ROW_ORDER=(settings sandbox-users sandbox-other sandbox-env sandbox-view sandbox-writes sandbox-powers network-n network-host network-8126 runner tools-path document-fetch proxy-calls proxy-content proxy-errors answer-filter links limits stop fail-closed images logs browser functional)
+ROW_ORDER=(settings sandbox-users sandbox-other sandbox-env sandbox-view sandbox-writes sandbox-powers network-n network-host network-8126 runner tools-path document-fetch proxy-calls proxy-content proxy-errors model-choice answer-filter links limits stop fail-closed images logs browser functional)
 
 record() { # record <PASS|FAIL|LATER|INFO> <row> <text>
 	local verdict="$1" row="$2" text="$3"
@@ -112,11 +113,15 @@ for line in open(".env", encoding="utf-8"):
         secret = value.strip().strip("\"").strip("'"'"'")
 print(hmac.new(secret.encode(), "\0".join(sys.argv[1:]).encode(), hashlib.sha256).hexdigest()[:32])' "$@"; }
 json_body() { python3 -I -c 'import json, sys; print(json.dumps({"model": "junior-silva-v2", "stream": False, "messages": [{"role": "user", "content": sys.argv[1]}]}))' "$1"; }
-chat() { # chat <reply file> <user id> <chat id> <text>: prints the HTTP status
+chat() { # chat <reply file> <user id> <chat id> <text> [provider/model] [level]: prints the HTTP status
 	# A file, not a variable: chat usually runs inside $( ), and cleanup needs every chat it made.
 	echo "$2:$3" >> "$WORK/chats.txt"
+	# A model and effort level picked for this message, as LibreChat's picker sends them (P3.18).
+	local picked=()
+	if [ -n "${5:-}" ]; then picked+=(-H "X-Pi-Model: $5"); fi
+	if [ -n "${6:-}" ]; then picked+=(-H "X-Pi-Thinking: $6"); fi
 	auth_config | curl -s -K - -o "$1" -w '%{http_code}' --max-time 300 -H "Content-Type: application/json" \
-		-H "x-librechat-user-id: $2" -H "x-librechat-conversation-id: $3" --data "$(json_body "$4")" "$PUBLIC_URL/v1/chat/completions"
+		-H "x-librechat-user-id: $2" -H "x-librechat-conversation-id: $3" ${picked[@]+"${picked[@]}"} --data "$(json_body "$4")" "$PUBLIC_URL/v1/chat/completions"
 }
 answer_of() { python3 -I -c 'import json, sys
 try:
@@ -182,14 +187,27 @@ SLOTS="$(inspect "$RUNNER" '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 
 GATEWAY_PORT="$(inspect "$RUNNER" '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^JS_GATEWAY_PORT=//p')"
 PI_IMAGE="$(inspect "$RUNNER" '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^JS_PI_IMAGE=//p')"
 SLOTS="${SLOTS:-3}"; GATEWAY_PORT="${GATEWAY_PORT:-8127}"; PI_IMAGE="${PI_IMAGE:-junior-silva-pi:local}"
-# The model provider the stack runs with (P3.17). The attack model and its crafted calls follow it.
+# The default model the stack runs with (P3.17), and every model users may pick (P3.18). The proxy attacks
+# run once for each allowed model, picked per message. The attack model answers in that model's format.
 PROVIDER="$(inspect "$BRIDGE" '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^PI_PROVIDER=//p' | tail -n 1)"; PROVIDER="${PROVIDER:-anthropic}"
-# With Google, the two proxy rows prove the tracker's "Model proxy (Google)" row.
-if [ "$PROVIDER" = google ]; then
+MODEL="$(inspect "$BRIDGE" '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^PI_MODEL=//p' | tail -n 1)"
+ALLOWED="$(inspect "$BRIDGE" '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^JS_ALLOWED_MODELS=//p' | tail -n 1 | tr -d ' ')"; ALLOWED="${ALLOWED:-$PROVIDER/$MODEL}"
+# The proxy rows prove the tracker's rows for the providers tested: Anthropic's, Google's, or both.
+case ",$ALLOWED" in
+	*,anthropic/*) has_anthropic=1 ;;
+	*) has_anthropic=0 ;;
+esac
+case ",$ALLOWED" in
+	*,google/*) has_google=1 ;;
+	*) has_google=0 ;;
+esac
+if [ "$has_google" = 1 ] && [ "$has_anthropic" = 1 ]; then
+	ROW_LABEL[proxy-calls]="Model proxy, Anthropic and Google: No token, other model, other route, oversized body, over budget"
+	ROW_LABEL[proxy-content]="Model proxy, Anthropic and Google: each one's server tools and URL or file sources"
+elif [ "$has_google" = 1 ]; then
 	ROW_LABEL[proxy-calls]="Model proxy (Google): No token, other model, other method or path, oversized body, over budget"
 	ROW_LABEL[proxy-content]="Model proxy (Google): Google's server tools, fileData, cachedContent"
 fi
-MODEL="$(inspect "$BRIDGE" '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^PI_MODEL=//p' | tail -n 1)"
 DATA_ROOT="$(inspect "$BRIDGE" '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}')"
 PUBLIC_URL="http://$(docker port "$BRIDGE" 8126/tcp 2>/dev/null | head -n 1)"
 LIBRECHAT_NETWORK="$(env_plain LIBRECHAT_NETWORK)"; LIBRECHAT_NETWORK="${LIBRECHAT_NETWORK:-librechat_default}"
@@ -210,7 +228,7 @@ PROBE_A="ffffffffffffffffffffffff1500000a"; PROBE_B="ffffffffffffffffffffffff150
 PROBE_CHAT_A="ffffffffffffffffffffffff1500000c"; PROBE_CHAT_B="ffffffffffffffffffffffff1500000d"
 CHAIN_USERS=("$(hex 12)" "$(hex 12)")
 USER_A="${CHAIN_USERS[0]}"; USER_B="${CHAIN_USERS[1]}"
-record INFO settings "stack: $SLOTS slots, gateway port $GATEWAY_PORT, Pi image $PI_IMAGE, model $PROVIDER $MODEL, public address $PUBLIC_URL, check $RUN_ID"
+record INFO settings "stack: $SLOTS slots, gateway port $GATEWAY_PORT, Pi image $PI_IMAGE, model $PROVIDER $MODEL, allowed $ALLOWED, public address $PUBLIC_URL, check $RUN_ID"
 
 check_settings() { # check_settings <label>
 	echo "=== $1"
@@ -383,19 +401,32 @@ check tools-path "both refusals were logged by the bridge" yes "$([ "$(docker lo
 check sandbox-other "through Pi's bash too: user A's file isn't there, and only one user folder is" "1 absent" "$(field "$bash_result" USERS) $(field "$bash_result" OTHER)"
 check sandbox-other "control: user A's test file was on disk during B's run" yes "$(as_data_user "test -f /d/users/$A_HASH/chats/$A_CHAT_HASH/uploads/iso-canary-a.txt" && echo yes || echo no)"
 
-status="$(chat "$WORK/b3.json" "$USER_B" "iso-$RUN_ID-b3" "ISO-PROXY $(mark b3) Please draft a short clause.")"
-proxy_result="$(tool_result "$(mark b3)" 0)"
 case_status() { printf '%s\n' "$proxy_result" | sed -n "s/^CASE=$1 STATUS=\([^ ]*\).*/\1/p" | head -n 1; }
-check proxy-calls "control: B's own token works for a plain model call" 200 "$(case_status valid)"
-check proxy-calls "no token, a wrong token, another model, another route, the other provider's route, a body over 32 MB: refused" "401 401 400 404 404 413" "$(case_status no-token) $(case_status wrong-token) $(case_status other-model) $(case_status other-route) $(case_status other-provider) $(case_status oversized)"
-record LATER proxy-calls "over budget: the per-run budget is on the later list"
-# The same five attacks in each provider's own form (attack-model.mjs).
-if [ "$PROVIDER" = google ]; then content_attacks="fileData, a googleSearch tool, a urlContext tool, a codeExecution tool, cachedContent"; else content_attacks="a URL image, a web search tool, a web fetch tool, mcp_servers, fallbacks"; fi
-check proxy-content "$content_attacks: refused" "400 400 400 400 400" "$(case_status url-image) $(case_status web-search) $(case_status web-fetch) $(case_status mcp-servers) $(case_status fallbacks)"
-check proxy-errors "an upstream error that repeats the key reaches Pi with the key removed" "401 yes" "$(case_status echo-key) $(printf '%s\n' "$proxy_result" | grep '^CASE=echo-key' | grep -qF '[removed]' && echo yes || echo no)"
-check proxy-errors "no reply to B's calls contains the bridge's key" no "$(python3 -I -c 'import sys
+# One run per allowed model, picked for the message as LibreChat's picker does (P3.18). Each run's token
+# allows only its own model, so "another model" and "the other provider's route" are this run's.
+proxy_number=0
+for choice in ${ALLOWED//,/ }; do
+	proxy_number=$((proxy_number + 1))
+	status="$(chat "$WORK/b3-$proxy_number.json" "$USER_B" "iso-$RUN_ID-b3-$proxy_number" "ISO-PROXY $(mark "b3m$proxy_number") Please draft a short clause." "$choice")"
+	proxy_result="$(tool_result "$(mark "b3m$proxy_number")" 0)"
+	check proxy-calls "$choice: control: B's own token works for a plain model call" 200 "$(case_status valid)"
+	check proxy-calls "$choice: no token, a wrong token, another model, another route, the other provider's route, a body over 32 MB: refused" "401 401 400 404 404 413" "$(case_status no-token) $(case_status wrong-token) $(case_status other-model) $(case_status other-route) $(case_status other-provider) $(case_status oversized)"
+	# The same five attacks in each provider's own form (attack-model.mjs).
+	if [ "${choice%%/*}" = google ]; then content_attacks="fileData, a googleSearch tool, a urlContext tool, a codeExecution tool, cachedContent"; else content_attacks="a URL image, a web search tool, a web fetch tool, mcp_servers, fallbacks"; fi
+	check proxy-content "$choice: $content_attacks: refused" "400 400 400 400 400" "$(case_status url-image) $(case_status web-search) $(case_status web-fetch) $(case_status mcp-servers) $(case_status fallbacks)"
+	check proxy-errors "$choice: an upstream error that repeats the key reaches Pi with the key removed" "401 yes" "$(case_status echo-key) $(printf '%s\n' "$proxy_result" | grep '^CASE=echo-key' | grep -qF '[removed]' && echo yes || echo no)"
+	check proxy-errors "$choice: no reply to B's calls contains the bridge's key" no "$(python3 -I -c 'import sys
 text = sys.stdin.read()
 print("yes" if "isolation-check-test-key-not-real" in text else "no")' <<< "$proxy_result")"
+done
+record LATER proxy-calls "over budget: the per-run budget is on the later list"
+
+# A choice that isn't allowed, or a level the model lacks, is refused before Pi starts (P3.18).
+runs_before="$(runner_log | grep -c 'started on slot')"
+refused_model="$(chat "$WORK/mc1.json" "$USER_B" "iso-$RUN_ID-mc1" "ISO-HELLO $(mark mc1) Please summarise a lease clause." "openai/gpt-6.1-sol")"
+refused_level="$(chat "$WORK/mc2.json" "$USER_B" "iso-$RUN_ID-mc2" "ISO-HELLO $(mark mc2) Please summarise a lease clause." "${ALLOWED%%,*}" "ultra")"
+runs_after="$(runner_log | grep -c 'started on slot')"
+check model-choice "a model not allowed, and a level no model has: 400, and no Pi run started" "400 400 0" "$refused_model $refused_level $((runs_after - runs_before))"
 
 status="$(chat "$WORK/b4.json" "$USER_B" "iso-$RUN_ID-b4" "ISO-MANYCALLS $(mark b4) Please draft a short clause.")"
 many_result="$(tool_result "$(mark b4)" 0)"

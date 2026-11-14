@@ -312,6 +312,8 @@ test("the bridge refuses to start without a model setup its proxy can check", as
 		["no model", { PI_MODEL: "" }, /PI_MODEL is not configured/],
 		["no Anthropic key", { ANTHROPIC_API_KEY: "" }, /ANTHROPIC_API_KEY is not configured/],
 		["Google with no Gemini key", { PI_PROVIDER: "google", PI_MODEL: "gemini-3.8-flash", GEMINI_API_KEY: "" }, /GEMINI_API_KEY is not configured/],
+		["an allowed model Pi's catalog doesn't know", { JS_ALLOWED_MODELS: "anthropic/claude-sonnet-5-5,anthropic/claude-made-up" }, /isn't in Pi's model catalog/],
+		["a default model that isn't allowed", { JS_ALLOWED_MODELS: "google/gemini-3.8-flash", GEMINI_API_KEY: "test-gemini-key" }, /JS_ALLOWED_MODELS must include them/],
 	]) {
 		const { child } = await startServer(t, overrides);
 		let stderr = "";

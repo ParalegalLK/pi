@@ -12,6 +12,9 @@ const { startGateway } = await import("../server/gateway.mjs");
 const { createRunToken, revokeRunToken } = await import("../server/run-tokens.mjs");
 
 const CHAT = { userHash: "a".repeat(32), chatHash: "b".repeat(32), folders: {} };
+// The model each test run was started with. Its run token carries it, and the proxy allows only it (P3.18).
+const CLAUDE_RUN = { provider: "anthropic", id: TEST_MODEL };
+const GEMINI_RUN = { provider: "google", id: GEMINI_TEST_MODEL };
 const BETAS = "mid-conversation-output-config-2026-07-01,thinking-binding-controls-2026-08-01,inline-tools-2026-09-15";
 const LIMIT = 32 * 1024 * 1024;
 const servers = [];
@@ -76,8 +79,10 @@ after(async () => {
 	for (const server of servers) await server.close();
 });
 
-async function openGateway(fakeUrl, modelService = {}) {
-	const gateway = await startGateway({ port: 0, host: "127.0.0.1", modelService: { model: TEST_MODEL, apiKey: PROXY_REAL_KEY, upstream: fakeUrl, ...modelService } });
+// One gateway serves both providers. Which one a call may use is decided by its run token.
+async function openGateway(fakeUrl, service = {}) {
+	const own = { apiKey: PROXY_REAL_KEY, upstream: fakeUrl, ...service };
+	const gateway = await startGateway({ port: 0, host: "127.0.0.1", modelServices: { anthropic: own, google: own } });
 	servers.push({ close: () => new Promise((resolve) => { gateway.closeAllConnections(); gateway.close(resolve); }) });
 	return gateway.address().port;
 }
@@ -116,7 +121,7 @@ function modelCall(port, { token, body = piBody(), headers = {}, from = "127.0.0
 }
 
 const geminiCall = (port, options = {}) => modelCall(port, { body: geminiBody(), route: GEMINI_ROUTE, ...options, gemini: true });
-const openGeminiGateway = (fakeUrl, modelService = {}) => openGateway(fakeUrl, { provider: "google", model: GEMINI_TEST_MODEL, ...modelService });
+const openGeminiGateway = (fakeUrl, service = {}) => openGateway(fakeUrl, service);
 
 async function waitUntil(check, withinMs, label) {
 	const deadline = Date.now() + withinMs;
@@ -157,7 +162,7 @@ test("each kind of unsafe call is caught", () => {
 test("an allowed call reaches the model with the real key, and streams back unchanged", async () => {
 	const fake = await newFake();
 	const port = await openGateway(fake.url);
-	const token = createRunToken(CHAT, 60_000, "127.0.0.1");
+	const token = createRunToken(CHAT, 60_000, "127.0.0.1", CLAUDE_RUN);
 	fake.script([{ text: "FAKE-PROXIED-ANSWER" }]);
 	const reply = await modelCall(port, { token, headers: { "user-agent": "Anthropic/JS", "x-stainless-os": "Linux", "x-extra": "not passed on" } });
 	assert.equal(reply.status, 200);
@@ -179,7 +184,7 @@ test("an allowed call reaches the model with the real key, and streams back unch
 test("a body with two model fields reaches the model with exactly one", async () => {
 	const fake = await newFake();
 	const port = await openGateway(fake.url);
-	const token = createRunToken(CHAT, 60_000, "127.0.0.1");
+	const token = createRunToken(CHAT, 60_000, "127.0.0.1", CLAUDE_RUN);
 	fake.script([{ text: "FAKE" }]);
 	const raw = `{"model":"claude-opus-9-9","model":"${TEST_MODEL}","max_tokens":10,"stream":true,"messages":[{"role":"user","content":"hi"}]}`;
 	assert.equal((await modelCall(port, { token, body: raw })).status, 200);
@@ -192,7 +197,7 @@ test("refused calls get 400 and never reach the model", async (t) => {
 	t.mock.method(console, "warn", () => {});
 	const fake = await newFake();
 	const port = await openGateway(fake.url);
-	const token = createRunToken(CHAT, 60_000, "127.0.0.1");
+	const token = createRunToken(CHAT, 60_000, "127.0.0.1", CLAUDE_RUN);
 	fake.script([]);
 	for (const body of [
 		changed((body) => { body.mcp_servers = []; }),
@@ -213,7 +218,7 @@ test("refused calls get 400 and never reach the model", async (t) => {
 test("calls without a valid run token get 401 and never reach the model", async () => {
 	const fake = await newFake();
 	const port = await openGateway(fake.url);
-	const token = createRunToken(CHAT, 60_000, "127.0.0.1");
+	const token = createRunToken(CHAT, 60_000, "127.0.0.1", CLAUDE_RUN);
 	for (const [label, options] of [["no token", {}], ["a wrong token", { token: "a".repeat(64) }], ["the LibreChat key", { token: "test-junior-silva-key" }], ["the real key", { token: PROXY_REAL_KEY }], ["the right token from another address", { token, from: "127.0.0.2" }]]) {
 		const reply = await modelCall(port, options);
 		assert.equal(reply.status, 401, label);
@@ -227,7 +232,7 @@ test("limits, routes and errors", async (t) => {
 	t.mock.method(console, "error", () => {});
 	const fake = await newFake();
 	const port = await openGateway(fake.url);
-	const token = createRunToken(CHAT, 60_000, "127.0.0.1");
+	const token = createRunToken(CHAT, 60_000, "127.0.0.1", CLAUDE_RUN);
 	fake.script([{ text: "FAKE-LARGE" }]);
 	const large = changed((body) => { body.messages[0].content[0].text = "x".repeat(6 * 1024 * 1024); });
 	assert.equal((await modelCall(port, { token, body: large })).status, 200, "a call larger than a tool call's 4 MB is fine");
@@ -263,7 +268,7 @@ test("limits, routes and errors", async (t) => {
 test("when Pi hangs up mid-answer, the call to the model is cancelled", async () => {
 	const fake = await newFake();
 	const port = await openGateway(fake.url);
-	const token = createRunToken(CHAT, 60_000, "127.0.0.1");
+	const token = createRunToken(CHAT, 60_000, "127.0.0.1", CLAUDE_RUN);
 	fake.script([{ hold: true }]);
 	const hangUp = new AbortController();
 	const call = modelCall(port, { token, signal: hangUp.signal }).catch(() => undefined);
@@ -309,7 +314,7 @@ test("each kind of unsafe Gemini call is caught", () => {
 test("an allowed Gemini call reaches the model with the real key in Google's header, and streams back unchanged", async () => {
 	const fake = await newFake();
 	const port = await openGeminiGateway(fake.url);
-	const token = createRunToken(CHAT, 60_000, "127.0.0.1");
+	const token = createRunToken(CHAT, 60_000, "127.0.0.1", GEMINI_RUN);
 	fake.script([{ text: "FAKE-GEMINI-ANSWER" }]);
 	const reply = await geminiCall(port, { token, headers: { "user-agent": "google-genai-sdk", "x-goog-api-client": "google-genai-sdk/2.21.0", "x-extra": "not passed on" } });
 	assert.equal(reply.status, 200);
@@ -330,7 +335,7 @@ test("refused Gemini calls get 400 in Google's error shape, and never reach the 
 	t.mock.method(console, "warn", () => {});
 	const fake = await newFake();
 	const port = await openGeminiGateway(fake.url);
-	const token = createRunToken(CHAT, 60_000, "127.0.0.1");
+	const token = createRunToken(CHAT, 60_000, "127.0.0.1", GEMINI_RUN);
 	fake.script([]);
 	for (const body of [
 		geminiChanged((body) => { body.cachedContent = "cachedContents/another-chat"; }),
@@ -351,7 +356,7 @@ test("refused Gemini calls get 400 in Google's error shape, and never reach the 
 test("Gemini calls without a valid run token get 401 in Google's shape, and never reach the model", async () => {
 	const fake = await newFake();
 	const port = await openGeminiGateway(fake.url);
-	const token = createRunToken(CHAT, 60_000, "127.0.0.1");
+	const token = createRunToken(CHAT, 60_000, "127.0.0.1", GEMINI_RUN);
 	for (const [label, options] of [["no token", {}], ["a wrong token", { token: "a".repeat(64) }], ["the real key", { token: PROXY_REAL_KEY }], ["the token in Anthropic's header", { headers: { "x-api-key": token } }], ["the right token from another address", { token, from: "127.0.0.2" }]]) {
 		const reply = await geminiCall(port, options);
 		assert.equal(reply.status, 401, label);
@@ -361,14 +366,23 @@ test("Gemini calls without a valid run token get 401 in Google's shape, and neve
 	revokeRunToken(token);
 });
 
-test("only the provider in use has an open route, and only Gemini's streaming method", async () => {
+test("a run can use only its own provider's route and model, and only Gemini's streaming method", async () => {
 	const fake = await newFake();
-	const gemini = await openGeminiGateway(fake.url);
-	const claude = await openGateway(fake.url);
-	const token = createRunToken(CHAT, 60_000, "127.0.0.1");
+	const port = await openGateway(fake.url);
+	const token = createRunToken(CHAT, 60_000, "127.0.0.1", GEMINI_RUN);
+	const claudeRun = createRunToken(CHAT, 60_000, "127.0.0.1", CLAUDE_RUN);
+	const noModel = createRunToken(CHAT, 60_000, "127.0.0.1");
 	fake.script([]);
-	assert.equal((await modelCall(gemini, { token })).status, 404, "Anthropic's route is closed when the provider is Google");
-	assert.equal((await geminiCall(claude, { token })).status, 404, "Gemini's route is closed when the provider is Anthropic");
+	assert.equal((await modelCall(port, { token })).status, 404, "a Gemini run can't use Anthropic's route");
+	assert.equal((await geminiCall(port, { token: claudeRun })).status, 404, "a Claude run can't use Gemini's route");
+	assert.equal((await modelCall(port, { token: noModel })).status, 404, "a run started without a model can't call Anthropic");
+	assert.equal((await geminiCall(port, { token: noModel })).status, 404, "or Gemini");
+	const otherClaude = changed((body) => { body.model = "claude-opus-5-5"; });
+	assert.equal((await modelCall(port, { token: claudeRun, body: otherClaude })).status, 400, "a Claude run can't call another Claude model");
+	const otherGemini = GEMINI_ROUTE.replace(GEMINI_TEST_MODEL, "gemini-4-argon");
+	assert.equal((await geminiCall(port, { token, route: otherGemini })).status, 400, "a Gemini run can't call another Gemini model");
+	revokeRunToken(claudeRun);
+	revokeRunToken(noModel);
 	for (const route of [
 		`/model/google/models/${GEMINI_TEST_MODEL}:generateContent`,
 		`/model/google/models/${GEMINI_TEST_MODEL}:countTokens`,
@@ -379,7 +393,7 @@ test("only the provider in use has an open route, and only Gemini's streaming me
 		"/model/google/cachedContents",
 		`/model/google/v1beta/models/${GEMINI_TEST_MODEL}:streamGenerateContent?alt=sse`,
 		`/model/google/models/../models/${GEMINI_TEST_MODEL}:streamGenerateContent?alt=sse`,
-	]) assert.equal((await geminiCall(gemini, { token, route })).status, 404, route);
+	]) assert.equal((await geminiCall(port, { token, route })).status, 404, route);
 	assert.equal(fake.requests.length, 0);
 	revokeRunToken(token);
 });
@@ -388,7 +402,7 @@ test("Gemini: the size limit, and the key removed from errors, a missing key and
 	t.mock.method(console, "error", () => {});
 	const fake = await newFake();
 	const port = await openGeminiGateway(fake.url);
-	const token = createRunToken(CHAT, 60_000, "127.0.0.1");
+	const token = createRunToken(CHAT, 60_000, "127.0.0.1", GEMINI_RUN);
 	const tooLarge = geminiChanged((body) => { body.contents[0].parts[0].text = "x".repeat(LIMIT); });
 	assert.equal((await geminiCall(port, { token, body: tooLarge })).status, 413);
 
@@ -433,6 +447,55 @@ test("real Pi works with Gemini through the proxy, and everything it sends is al
 		assert.equal(arrived.headers["x-goog-api-key"], PROXY_REAL_KEY);
 		assert.equal(googleCallProblem(arrived.body, GEMINI_TEST_MODEL, GEMINI_TEST_MODEL), undefined, "real Pi's call is on the allowed lists");
 	}
+	assert.doesNotMatch(bridge.log, /Refused a model call/);
+});
+
+test("each message runs on the model and effort its user picked, and nothing else is allowed (P3.18)", async () => {
+	const fake = await newFake();
+	const allowed = `anthropic/${TEST_MODEL},google/${GEMINI_TEST_MODEL}`;
+	const bridge = await startBridgeWithFakeModel(fake.url, { environment: { JS_ALLOWED_MODELS: allowed, GEMINI_API_KEY: PROXY_REAL_KEY } });
+	servers.push(bridge);
+	const picker = (model, thinking) => ({ headers: { "X-Pi-Model": model, ...(thinking ? { "X-Pi-Thinking": thinking } : {}) } });
+
+	// The picker's list: both models, each with its own levels from Pi's catalog, behind the bridge key.
+	const catalogUrl = `http://127.0.0.1:${bridge.port}/v1/pi/models`;
+	assert.equal((await fetch(catalogUrl)).status, 401, "the list needs the bridge key");
+	const catalog = await (await fetch(catalogUrl, { headers: { Authorization: "Bearer test-junior-silva-key" } })).json();
+	assert.deepEqual(catalog.models.map((model) => [`${model.provider}/${model.id}`, model.thinkingLevels]), [
+		[`anthropic/${TEST_MODEL}`, ["low", "medium", "high", "xhigh", "max"]],
+		[`google/${GEMINI_TEST_MODEL}`, ["low", "medium", "high"]],
+	]);
+
+	// Gemini on high, for this message only, while the default is Claude.
+	fake.script([{ text: "FAKE-GEMINI: picked." }]);
+	assert.equal((await ask(bridge, "picker-chat-1", "What is a lease?", picker(`google/${GEMINI_TEST_MODEL}`, "high"))).answer, "FAKE-GEMINI: picked.");
+	assert.equal(fake.requests.at(-1).path, `/models/${GEMINI_TEST_MODEL}:streamGenerateContent?alt=sse`);
+	assert.match(JSON.stringify(fake.requests.at(-1).body.generationConfig), /"thinkingLevel":"HIGH"/);
+
+	// Claude on max, a level only Claude has. Everything real Pi sends at max is allowed too.
+	fake.script([{ text: "FAKE: max." }]);
+	assert.equal((await ask(bridge, "picker-chat-2", "What is a lease?", picker(`anthropic/${TEST_MODEL}`, "max"))).answer, "FAKE: max.");
+	assert.equal(fake.requests.at(-1).body.model, TEST_MODEL);
+	assert.match(JSON.stringify(fake.requests.at(-1).body), /"effort":"max"/);
+
+	// No choice: the default model.
+	fake.script([{ text: "FAKE: default." }]);
+	assert.equal((await ask(bridge, "picker-chat-3", "What is a lease?")).answer, "FAKE: default.");
+	assert.equal(fake.requests.at(-1).body.model, TEST_MODEL);
+
+	// Refused with 400 before Pi starts, so nothing reaches the model.
+	const reachedBefore = fake.requests.length;
+	for (const [index, [label, options, expected]] of [
+		["max on Gemini", picker(`google/${GEMINI_TEST_MODEL}`, "max"), /^That effort level isn't available for Gemini 3\.8 Flash\. Choose one of: low, medium, high\.$/],
+		["a model in Pi's catalog but not allowed", picker("anthropic/claude-opus-5-5"), /^The chosen model isn't available here\./],
+		["a provider with no route", picker("openai/gpt-6.1-sol"), /^The chosen model isn't available here\./],
+		["a made-up level", { headers: { "X-Pi-Thinking": "ultra" } }, /isn't available for Claude Sonnet 5\.5/],
+	].entries()) {
+		const reply = await ask(bridge, `picker-refused-${index}`, "What is a lease?", options);
+		assert.equal(reply.status, 400, label);
+		assert.match(reply.error, expected, label);
+	}
+	assert.equal(fake.requests.length, reachedBefore, "no refused message reached the model");
 	assert.doesNotMatch(bridge.log, /Refused a model call/);
 });
 

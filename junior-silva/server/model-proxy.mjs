@@ -2,8 +2,8 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
 // Pi calls the model through here with its run token. The proxy checks the call, swaps the token for the
-// real key, and streams the answer back, so Pi never needs the key. Only the provider in PI_PROVIDER is
-// open (task/plan.md 3.8).
+// real key, and streams the answer back, so Pi never needs the key. Each run may call only the provider
+// and model it was started with, which its run token records (task/plan.md 3.8, P3.18).
 const MAX_MODEL_BYTES = 32 * 1024 * 1024;
 
 // For each provider Pi can use: the setting that holds the real key, and where its calls go by default.
@@ -171,7 +171,7 @@ const UPSTREAM_CALLS = {
 	},
 	google: {
 		problem: (body, req, settings) => googleCallProblem(body, settings.pathModel, settings.model),
-		// The model was checked against PI_MODEL, and only PI_MODEL goes upstream.
+		// The model was checked against this run's own model, and only that model goes upstream.
 		url: (upstream, model) => `${upstream}/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`,
 		headers(incoming, apiKey) {
 			const headers = { "x-goog-api-key": apiKey, "content-type": "application/json" };

@@ -96,6 +96,8 @@ function bridgeEnvironment(root, port, runner, overrides) {
 		JUNIOR_SILVA_PUBLIC_URL: `http://127.0.0.1:${port}`,
 		PI_PROVIDER: "anthropic",
 		PI_MODEL: "claude-sonnet-5-5",
+		// Empty, so a message with no choice gets medium.
+		PI_THINKING: "",
 		ANTHROPIC_API_KEY: "test-anthropic-key",
 		JUNIOR_SILVA_DATA_ROOT: root,
 		JUNIOR_SILVA_ARTIFACT_ROOT: path.join(root, "artifacts"),
@@ -133,10 +135,10 @@ function chatHeaders(chat) {
 	return { authorization: `Bearer ${KEY}`, "content-type": "application/json", "x-librechat-user-id": USER_A, "x-librechat-conversation-id": chat };
 }
 
-async function send(bridge, chat, text) {
+async function send(bridge, chat, text, headers = {}) {
 	const response = await fetch(`http://127.0.0.1:${bridge.port}/v1/chat/completions`, {
 		method: "POST",
-		headers: chatHeaders(chat),
+		headers: { ...chatHeaders(chat), ...headers },
 		body: JSON.stringify({ model: "junior-silva-v2", messages: [{ role: "user", content: text }], stream: false }),
 	});
 	return { status: response.status, body: await response.json() };
@@ -155,8 +157,10 @@ test("a chat is answered through the runner on a free slot, and the bridge doesn
 	assert.equal(answerOf(reply), "The answer from Pi's container.");
 	const [run] = runner.runs;
 	assert.equal(run.authorization, `Bearer ${RUNNER_SECRET}`);
-	assert.deepEqual(Object.keys(run.body).sort(), ["chatHash", "model", "prompt", "provider", "requestId", "runToken", "slot", "userHash"]);
+	assert.deepEqual(Object.keys(run.body).sort(), ["chatHash", "model", "prompt", "provider", "requestId", "runToken", "slot", "thinking", "userHash"]);
 	assert.equal(run.body.provider, "anthropic");
+	assert.equal(run.body.model, "claude-sonnet-5-5");
+	assert.equal(run.body.thinking, "medium", "no choice and no PI_THINKING: medium");
 	assert.equal(run.body.requestId, reply.body.id, "the run uses the message's own ID");
 	assert.match(run.body.userHash, /^[0-9a-f]{32}$/);
 	assert.match(run.body.chatHash, /^[0-9a-f]{32}$/);
@@ -167,6 +171,20 @@ test("a chat is answered through the runner on a free slot, and the bridge doesn
 	assert.ok(run.body.prompt.endsWith("User request:\nWhat is the limitation period?"));
 	for (const folder of ["uploads", "artifacts", "workspace", "sessions"]) assert.ok((await stat(path.join(chatRoot(bridge, run), folder))).isDirectory(), `the runner mounts ${folder}, so it must exist`);
 	assert.equal(existsSync(requestFolder(bridge, run)), false, "Pi's start-up script makes the message folder, not the bridge");
+});
+
+test("the model and effort a user picked reach the runner, and a choice that isn't allowed starts no run (P3.18)", async (t) => {
+	const runner = await standInRunner(t);
+	const bridge = await startBridge(t, runner, { JS_ALLOWED_MODELS: "anthropic/claude-sonnet-5-5,google/gemini-3.8-flash", GEMINI_API_KEY: "test-gemini-key" });
+	runner.queue.push((run) => run.answer("Gemini on high."));
+	const reply = await send(bridge, "chat-picked-0001", "What is a lease?", { "X-Pi-Model": "google/gemini-3.8-flash", "X-Pi-Thinking": "high" });
+	assert.equal(reply.status, 200, JSON.stringify(reply.body));
+	const [run] = runner.runs;
+	assert.deepEqual([run.body.provider, run.body.model, run.body.thinking], ["google", "gemini-3.8-flash", "high"]);
+	const refused = await send(bridge, "chat-picked-0002", "What is a lease?", { "X-Pi-Model": "google/gemini-3.8-flash", "X-Pi-Thinking": "max" });
+	assert.equal(refused.status, 400);
+	assert.match(refused.body.error.message, /isn't available for Gemini 3\.8 Flash/);
+	assert.equal(runner.runs.length, 1, "the refused message started no run");
 });
 
 test("the run token only works from the slot's Pi address, not from the bridge's own machine", async (t) => {

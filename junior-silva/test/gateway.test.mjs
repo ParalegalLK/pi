@@ -200,22 +200,22 @@ test("Pi's network is 10.89.*, and the gateway accepts only that and local calls
 	}
 });
 
-test("a model call is only the route of the provider in use, and Gemini's only for its streaming method", () => {
+test("a model call is each provider's own route, and Gemini's only for its streaming method", () => {
+	// Which of these a run may use is decided by its run token (model-proxy.test.mjs).
 	const gemini = "/model/google/models/gemini-3.8-flash:streamGenerateContent?alt=sse";
-	assert.deepEqual(modelCallRoute("POST", "/model/anthropic/v1/messages?beta=true", "anthropic"), { provider: "anthropic" });
-	assert.deepEqual(modelCallRoute("POST", "/model/anthropic/v1/messages", "anthropic"), { provider: "anthropic" });
-	assert.deepEqual(modelCallRoute("POST", gemini, "google"), { provider: "google", pathModel: "gemini-3.8-flash" });
+	assert.deepEqual(modelCallRoute("POST", "/model/anthropic/v1/messages?beta=true"), { provider: "anthropic" });
+	assert.deepEqual(modelCallRoute("POST", "/model/anthropic/v1/messages"), { provider: "anthropic" });
+	assert.deepEqual(modelCallRoute("POST", gemini), { provider: "google", pathModel: "gemini-3.8-flash" });
 	const closed = [
-		["POST", gemini, "anthropic"],
-		["POST", "/model/anthropic/v1/messages?beta=true", "google"],
-		["GET", gemini, "google"],
-		["POST", "/model/google/models/gemini-3.8-flash:generateContent", "google"],
-		["POST", "/model/google/models/gemini-3.8-flash:streamGenerateContent", "google"],
-		["POST", "/model/google/models/gemini-3.8-flash:streamGenerateContent?alt=sse&key=x", "google"],
-		["POST", "/model/google/models/a/b:streamGenerateContent?alt=sse", "google"],
-		["POST", "/model/google/files", "google"],
-		["POST", "/model/anthropic/v1/messages?beta=true", undefined],
-		["POST", gemini, "openai"],
+		["GET", gemini],
+		["GET", "/model/anthropic/v1/messages"],
+		["POST", "/model/anthropic/v1/messages?beta=false"],
+		["POST", "/model/google/models/gemini-3.8-flash:generateContent"],
+		["POST", "/model/google/models/gemini-3.8-flash:streamGenerateContent"],
+		["POST", "/model/google/models/gemini-3.8-flash:streamGenerateContent?alt=sse&key=x"],
+		["POST", "/model/google/models/a/b:streamGenerateContent?alt=sse"],
+		["POST", "/model/google/files"],
+		["POST", "/model/openai/v1/chat/completions"],
 	];
-	for (const [method, url, provider] of closed) assert.equal(modelCallRoute(method, url, provider), undefined, `${method} ${url} (${provider})`);
+	for (const [method, url] of closed) assert.equal(modelCallRoute(method, url), undefined, `${method} ${url}`);
 });

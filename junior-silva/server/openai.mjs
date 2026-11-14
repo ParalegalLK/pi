@@ -10,6 +10,7 @@ import { artifactsRoot, env, projectRoot, requiredEnv } from "../core/environmen
 import { mimeType, publishWorkspaceArtifact, resolveArtifactRequest, safeFilename } from "../core/files.mjs";
 import { newestRequestedArtifact, requestedSlideCount } from "../core/artifact-delivery.mjs";
 import { arrivedOnPiNetwork, GATEWAY_PORT, startGateway } from "./gateway.mjs";
+import { loadModelChoices, modelChoice, piModelsCatalog } from "./model-choice.mjs";
 import { MODEL_PROVIDERS } from "./model-proxy.mjs";
 import { createSlotPool, piAddress, startContainerPi, startLocalPi } from "./pi-executor.mjs";
 import { bearerToken, createRunToken, revokeRunToken } from "./run-tokens.mjs";
@@ -40,12 +41,9 @@ let slotPool;
 const LOCAL_PI_ADDRESS = "127.0.0.1";
 // Each run gets its own settings folder in here, removed when the run ends.
 const RUNS_ROOT = path.join(path.dirname(artifactsRoot), "pi-runs");
-// Pi's model calls go through the bridge's model proxy, which has a route for each of these providers.
-const PI_PROVIDER = env("PI_PROVIDER", "anthropic");
-const PI_MODEL = env("PI_MODEL");
 // Pi fills in $JS_RUN_TOKEN from its own settings when it calls the model, so the token is never
-// written to disk. The proxy swaps it for the real key. Both providers point at the proxy, which keeps
-// all but PI_PROVIDER's route closed.
+// written to disk. The proxy swaps it for the real key. Both providers point at the proxy, which lets
+// each run call only the provider and model it was started with (P3.18).
 const PI_MODELS_SETTINGS = `${JSON.stringify({ providers: Object.fromEntries(Object.keys(MODEL_PROVIDERS).map((provider) => [provider, { baseUrl: `http://${LOCAL_PI_ADDRESS}:${GATEWAY_PORT}/model/${provider}`, apiKey: "$JS_RUN_TOKEN" }])) }, null, 2)}\n`;
 
 function json(res, status, value) {
@@ -517,7 +515,7 @@ function finishedAnswer(text, stopReason) {
 	return `${NOT_COMPLETE_NOTE}\n\n---\n\n${answer}`;
 }
 
-function localPiArgs(sessionId) {
+function localPiArgs(sessionId, choice) {
 	// Hosted Pi uses administrator-owned legal MCP registration. Its normal built-in
 	// tools remain subject to the legal-scope extension and deployment sandbox.
 	const args = [
@@ -530,39 +528,39 @@ function localPiArgs(sessionId) {
 		"--extension", path.join(projectRoot, ".pi", "extensions", "legal-research-citation-delivery.ts"),
 		"--extension", path.join(projectRoot, ".pi", "extensions", "librechat-preview-delivery.ts"),
 	];
-	args.push("--provider", PI_PROVIDER, "--model", PI_MODEL);
-	if (env("PI_THINKING")) args.push("--thinking", env("PI_THINKING"));
+	args.push("--provider", choice.provider, "--model", choice.model, "--thinking", choice.thinking);
 	return args;
 }
 
 // Starts Pi for one run: through the runner on a free slot (the container way, the default), or as a
 // process here (the local way, development only). The run token is tied to the address Pi calls from.
-// Whatever has to be undone when the run ends is added to cleanUps.
-async function startPi({ requestId, requestWorkspace, sessionId, chat, prompt, timeoutMs, signal, cleanUps }) {
+// Whatever has to be undone when the run ends is added to cleanUps. choice is the message's model and
+// effort level (model-choice.mjs), and the run token records the model, so the model proxy allows only it.
+async function startPi({ requestId, requestWorkspace, sessionId, chat, prompt, timeoutMs, signal, cleanUps, choice }) {
+	const model = { provider: choice.provider, id: choice.model };
 	if (PI_EXECUTOR === "local") {
 		// In the container way, Pi's start-up script makes this folder. Here the bridge does, as before P3.
 		await mkdir(requestWorkspace, { recursive: true });
 		const settingsFolder = await createPiSettings();
 		cleanUps.push(() => rm(settingsFolder, { recursive: true, force: true }));
-		const runToken = createRunToken(chat, timeoutMs, LOCAL_PI_ADDRESS);
+		const runToken = createRunToken(chat, timeoutMs, LOCAL_PI_ADDRESS, model);
 		cleanUps.push(() => revokeRunToken(runToken));
 		signal.throwIfAborted();
 		const environment = agentEnvironment(chat.folders, requestWorkspace, runToken, settingsFolder);
-		return { runToken, pi: startLocalPi({ command: process.execPath, args: localPiArgs(sessionId), cwd: projectRoot, environment, prompt }) };
+		return { runToken, pi: startLocalPi({ command: process.execPath, args: localPiArgs(sessionId, choice), cwd: projectRoot, environment, prompt }) };
 	}
 	const slot = await slotPool.take(signal);
 	cleanUps.push(() => slotPool.release(slot));
 	// The token only works from this slot's Pi container, so a stolen one is useless anywhere else.
-	const runToken = createRunToken(chat, timeoutMs, piAddress(slot));
+	const runToken = createRunToken(chat, timeoutMs, piAddress(slot), model);
 	cleanUps.push(() => revokeRunToken(runToken));
 	signal.throwIfAborted();
-	const thinking = env("PI_THINKING");
-	const run = { requestId, userHash: chat.userHash, chatHash: chat.chatHash, slot, runToken, provider: PI_PROVIDER, model: PI_MODEL, ...(thinking ? { thinking } : {}) };
+	const run = { requestId, userHash: chat.userHash, chatHash: chat.chatHash, slot, runToken, provider: choice.provider, model: choice.model, thinking: choice.thinking };
 	return { runToken, pi: startContainerPi({ runnerUrl: RUNNER_URL, runnerSecret: RUNNER_SECRET, run, prompt }) };
 }
 
 // One run of Pi. makePrompt(requestWorkspace) builds the prompt for this run's own message folder.
-async function runPiOnce({ requestId, makePrompt, sessionId, onProgress, chat, signal }) {
+async function runPiOnce({ requestId, makePrompt, sessionId, onProgress, chat, signal, choice }) {
 	const requestWorkspace = path.join(chat.folders.workspace, "requests", requestId);
 	const sessionSizesBefore = await sessionFileSizes(chat.folders.sessions);
 	const startedAt = Date.now();
@@ -572,7 +570,9 @@ async function runPiOnce({ requestId, makePrompt, sessionId, onProgress, chat, s
 	try {
 		// A message whose connection closed while it waited in the queue never starts Pi.
 		signal.throwIfAborted();
-		const { runToken, pi } = await startPi({ requestId, requestWorkspace, sessionId, chat, prompt: makePrompt(requestWorkspace), timeoutMs, signal, cleanUps });
+		const { runToken, pi } = await startPi({ requestId, requestWorkspace, sessionId, chat, prompt: makePrompt(requestWorkspace), timeoutMs, signal, cleanUps, choice });
+		// Which model and level this run used, for the trace. Never any chat text.
+		void audit(sessionId, { type: "run", requestId, provider: choice.provider, model: choice.model, thinking: choice.thinking }).catch(() => {});
 		return await new Promise((resolve, reject) => {
 			// The service-level SSE keepalive is intentionally invisible. This bounded
 			// timer is different: it tells the user that Pi is still alive when a
@@ -699,7 +699,7 @@ async function publishRecoveredArtifact(candidate, instruction) {
 	return publication;
 }
 
-async function recoverUndeliveredArtifact({ instruction, chat, sessionId, initial, onProgress, signal }) {
+async function recoverUndeliveredArtifact({ instruction, chat, sessionId, initial, onProgress, signal, choice }) {
 	if (initial.artifactPublished) return initial;
 	// The folder of the run that answered, which a retry may have changed.
 	const { requestWorkspace } = initial;
@@ -718,6 +718,8 @@ async function recoverUndeliveredArtifact({ instruction, chat, sessionId, initia
 		onProgress,
 		chat,
 		signal,
+		// The repair uses the same model and level the user chose.
+		choice,
 	}).catch(() => undefined);
 	if (repair?.artifactPublished) return repair;
 	if (signal.aborted) return initial;
@@ -788,10 +790,8 @@ requiredEnv("JS_IDENTITY_SECRET");
 requiredEnv("JUNIOR_SILVA_ARTIFACT_SECRET");
 if (env("JS_NATIVE_DEV")) throw new Error("JS_NATIVE_DEV is only for the native CLI. Remove it from the bridge's settings.");
 // Pi's model calls go through the model proxy, which has a route for Anthropic and for Google only
-// (task/plan.md 3.8). The proxy holds the provider's real key.
-if (!Object.hasOwn(MODEL_PROVIDERS, PI_PROVIDER)) throw new Error(`PI_PROVIDER must be ${Object.keys(MODEL_PROVIDERS).join(" or ")}. Pi's model calls go through the bridge's model proxy, which has no route for other providers.`);
-requiredEnv("PI_MODEL");
-requiredEnv(MODEL_PROVIDERS[PI_PROVIDER].keySetting);
+// (task/plan.md 3.8), and holds their real keys. Users pick from these models for each message (P3.18).
+const modelChoices = loadModelChoices();
 if (PI_EXECUTOR !== "container" && PI_EXECUTOR !== "local") throw new Error("JS_PI_EXECUTOR must be container or local.");
 if (PI_EXECUTOR === "local" && env("JS_ALLOW_LOCAL_PI") !== "1") throw new Error("JS_PI_EXECUTOR=local runs Pi inside the bridge, next to its keys and every chat's files, so it's for development only. Set JS_ALLOW_LOCAL_PI=1 to use it anyway.");
 if (PI_EXECUTOR === "container") {
@@ -824,9 +824,13 @@ const server = createServer(async (req, res) => {
 		if (req.method === "GET" && url.pathname.startsWith("/files/")) return await serveArtifact(res, url.pathname, url.searchParams.get("exp"));
 		if (url.pathname.startsWith("/v1/") && !authorized(req)) return json(res, 401, { error: { message: "Unauthorized", type: "authentication_error" } });
 		if (req.method === "GET" && url.pathname === "/v1/models") return json(res, 200, { object: "list", data: [{ id: MODEL, object: "model", created: 0, owned_by: "paralegal.lk" }] });
+		// The models LibreChat's picker may offer, each with its own effort levels (P3.18).
+		if (req.method === "GET" && url.pathname === "/v1/pi/models") return json(res, 200, piModelsCatalog(modelChoices));
 		if (req.method === "POST" && url.pathname === "/v1/chat/completions") {
 			const body = await requestBody(req);
 			const scope = resolveChatScope(req.headers, body);
+			// The user's model and effort level, checked before anything starts.
+			const choice = modelChoice(req.headers, modelChoices);
 			const key = scope.chatHash;
 			const messages = Array.isArray(body.messages) ? body.messages : [];
 			const uploadText = textUploads(messages);
@@ -841,8 +845,8 @@ const server = createServer(async (req, res) => {
 			const onProgress = (message) => { if (streaming) streamDelta(res, id, "reasoning_content", `${message}\n`); };
 			const sessionId = `junior-silva-v2-${key}`;
 			const result = await serial(key, () => runInChat(chat, async () => {
-				const initial = await runPi({ requestId: id, makePrompt: (requestWorkspace) => piPrompt(uploadText.instruction, files, requestWorkspace), sessionId, onProgress, chat, signal: stop.signal });
-				return recoverUndeliveredArtifact({ instruction: uploadText.instruction, chat, sessionId, initial, onProgress, signal: stop.signal });
+				const initial = await runPi({ requestId: id, makePrompt: (requestWorkspace) => piPrompt(uploadText.instruction, files, requestWorkspace), sessionId, onProgress, chat, signal: stop.signal, choice });
+				return recoverUndeliveredArtifact({ instruction: uploadText.instruction, chat, sessionId, initial, onProgress, signal: stop.signal, choice });
 			}));
 			if (heartbeat) clearInterval(heartbeat);
 			if (streaming) return finishStream(res, id, result.answer, includeStreamUsage ? result.usage : undefined);

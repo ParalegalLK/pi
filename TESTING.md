@@ -53,7 +53,10 @@ Run the focused tests for the feature changed in the current work first. Do not 
 - On a shared server it matters most that Pi can't reach the server's other services. So from a slot, it tries every TCP port the host listens on, on each of the host's addresses (P7.8). Ports open only to the host's own loopback are left out, because a container can't reach them. Its control is that they answer from the host itself. Any the host itself can't connect to, often because of its own firewall, are listed as proving nothing.
 - Direct probes run a script inside a real Pi container, started with the runner's own Docker settings but without Pi, because Pi's guard would block some attacks first and hide a weak wall.
 - Full-chain tests run real Pi through the real bridge and runner, with the stand-in model scripting the attacks. Each one first proves the attack really ran.
-- It runs with the provider the stack is set to, Anthropic or Google (`PI_PROVIDER`). The stand-in model answers in that provider's format, and the crafted model calls use that provider's form: for Google, `fileData`, `googleSearch`, `urlContext`, `codeExecution` and `cachedContent`. A call to the other provider's route must get 404. To prove both, run it once with each.
+- It runs the model-proxy attacks once for each model in the stack's `JS_ALLOWED_MODELS` (or the default model, when that's empty), picking it for the message as LibreChat's picker does. For each run:
+  - the stand-in model answers in that provider's format, and the crafted model calls use that provider's form; for Google, that's `fileData`, `googleSearch`, `urlContext`, `codeExecution` and `cachedContent`;
+  - a call to the other provider's route must get 404, and another model 400, because each run's token allows only its own model.
+  It also checks that a model not allowed, or a level the model lacks, gets 400 before any Pi run starts. To prove both providers, allow both.
 - Every wall test has a positive control, such as user A's file being on disk while B tries to read it. A failed control counts as a failure.
 
 Then, by hand in LibreChat with two accounts:
@@ -61,6 +64,17 @@ Then, by hand in LibreChat with two accounts:
 - [ ] Account A uploads a small test document and asks about it.
 - [ ] Account B asks for A's document by its exact path in the data folder (the 29 Oct attack). It must fail.
 - [ ] Stop works for both, chat titles appear, and a file Junior Silva made downloads.
+
+## Model picker (P3.18)
+
+With LibreChat's picker turned on for Junior Silva (`piModelPicker` in `librechat.yaml`):
+
+- [ ] The gauge button appears in the message box for Junior Silva only.
+- [ ] The model list shows exactly the allowed models, grouped by provider.
+- [ ] Each model's effort slider shows only that model's levels: Gemini 3.8 Flash low to high; Claude Opus 5.5 low to max. Switching models moves an unsupported level to medium.
+- [ ] A message answers on the picked model and level, and the bridge's audit log records them (`"type":"run"`).
+- [ ] A reopened chat keeps its choice, and a new chat doesn't inherit an unsent one.
+- [ ] `GET /v1/pi/models` needs the bridge key. A model not allowed, or a level the model lacks, gets 400 with a clear message.
 
 ## Load test
 

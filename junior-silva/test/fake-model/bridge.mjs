@@ -71,17 +71,18 @@ export async function startBridgeWithFakeModel(fakeModelUrl, { environment: over
 	return bridge;
 }
 
-export function send(bridge, chatId, text, { stream = false, signal } = {}) {
+// headers adds to LibreChat's own, for example the picker's X-Pi-Model and X-Pi-Thinking (P3.18).
+export function send(bridge, chatId, text, { stream = false, signal, headers = {} } = {}) {
 	return fetch(`http://127.0.0.1:${bridge.port}/v1/chat/completions`, {
 		method: "POST",
-		headers: { "Content-Type": "application/json", Authorization: `Bearer ${API_KEY}`, "x-librechat-user-id": USER, "x-librechat-conversation-id": chatId },
+		headers: { "Content-Type": "application/json", Authorization: `Bearer ${API_KEY}`, "x-librechat-user-id": USER, "x-librechat-conversation-id": chatId, ...headers },
 		body: JSON.stringify({ user: USER, stream, messages: [{ role: "user", content: text }] }),
 		signal,
 	});
 }
 
-export async function ask(bridge, chatId, text) {
-	const response = await send(bridge, chatId, text);
+export async function ask(bridge, chatId, text, options = {}) {
+	const response = await send(bridge, chatId, text, options);
 	const body = await response.json();
 	return { status: response.status, answer: body.choices?.[0]?.message?.content ?? "", error: body.error?.message };
 }
