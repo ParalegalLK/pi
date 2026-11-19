@@ -1,11 +1,11 @@
 ---
 name: sri-lankan-legal-research
-description: Route Sri Lankan case-catalogue requests to direct indexed sources and legal-analysis requests to citation-linked research.
+description: Choose appropriate sources for Sri Lankan case catalogues and legal analysis, including private precedents for document context.
 ---
 
 # Sri Lankan legal research
 
-Use this skill for Sri Lankan legal research requests where the difference between an indexed case list and a legal analysis affects the source tool.
+Use this skill to choose sources for Sri Lankan legal research and document analysis.
 
 ## Choose the source deliberately
 
@@ -39,6 +39,14 @@ A question about the text, changes, date, status, enactment, commencement, or ef
 Use it when that identity or wording would materially affect the answer. `rag_chat_research` is stronger for legal analysis, authorities, judicial treatment, and synthesis. `web_search_public_legal_sources` is useful for current official publications, Gazettes, parliamentary material, or material outside the indexed corpus.
 
 When sources describe instruments with similar names, do not blend them. Compare their title, enactment or certification date, number, and operative provisions. Explain the distinction if it matters to the answer.
+
+## Private precedent references
+
+When a comparable document would clarify structure, procedural context, or clause patterns, consider a focused `legal_precedent_search`. Use `legal_precedent_read` for a relevant excerpt when the search results alone are insufficient. Choose whether to use the corpus based on the question. A catalogue lookup or a question about current law rarely needs a precedent.
+
+Use the supplied document and case record to establish the facts, wording, and reasons for any specific outcome. Use verified legal authorities to support legal requirements or conclusions. Private examples can help explain common practice, but their wording and assumptions do not establish a rule or what happened in a particular case.
+
+Keep wiki excerpts, names, and private identifiers out of queries sent to research services. Use the private examples as background and keep their text, titles, filenames, paths, and source-specific details out of the final answer.
 
 ## Source integrity
 

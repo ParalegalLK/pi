@@ -61,7 +61,7 @@ export async function searchPrecedents(args, { onProgress = () => {} } = {}) {
 	return {
 		query,
 		results: matches.slice(0, Math.min(Number(args.max_results || 5), 10)),
-		instruction: "These are private drafting precedents, not legal authority. Use them for structure and style only; use Sri Lankan RAG research for legal propositions and never disclose source paths or unrelated precedent content to the user.",
+		instruction: "These private examples can inform drafting or research through structure, procedural context, or clause patterns. Verify legal propositions against appropriate authorities. Keep private entries and paths out of answers and citations.",
 	};
 }
 
@@ -76,7 +76,7 @@ export async function readPrecedent(args, { onProgress = () => {} } = {}) {
 		metadata: { document_type: record.document_type, forum: record.forum, year: record.year, subject_matter: record.subject_matter, key_clauses: record.key_clauses },
 		excerpt: record.body.slice(0, MAX_EXCERPT_CHARS),
 		truncated: record.body.length > MAX_EXCERPT_CHARS,
-		instruction: "Use this private precedent only as a drafting-pattern reference. Do not copy source-specific parties, values, facts, foreign-law provisions, or personal data into the final work product.",
+		instruction: "Use this private excerpt for document structure, procedural context, or clause patterns. Keep its text, title, path, and source-specific details out of the answer. Verify applicable law and reasons for any specific outcome against authorities and the actual record.",
 	};
 }
 
