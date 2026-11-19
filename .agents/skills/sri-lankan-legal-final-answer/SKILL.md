@@ -79,6 +79,7 @@ Use web material only when it adds verified value, particularly for a Gazette, c
 
 - Place each case, statute, amendment, official publication, or web source link next to the proposition it supports.
 - Preserve valid Markdown links supplied by RAG, direct legal-source retrieval, or public-source research.
+- Use private wiki precedents as background only. Keep their citations, links, quotations, titles, filenames, paths, and source-specific details out of the answer. Cite the verified, shareable authorities that support legal propositions.
 - Retain only sources actually used in the final response. Do not append a detached authority merely because a tool returned it.
 - If an authority list is useful because the user requested sources or the answer is long, title it accurately: `Authorities cited in this answer`. Include only authorities cited in the body.
 - Quote judgments only from retrieved judgment text, not a generated summary. Use a blockquote for a judgment quotation. Quote statutory text only from retrieved primary text and keep quotations short.
