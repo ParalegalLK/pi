@@ -11,6 +11,7 @@ services:
       JUNIOR_SILVA_DATA_ROOT: /data
       JUNIOR_SILVA_ARTIFACT_ROOT: /data/artifacts
       JUNIOR_SILVA_UPLOAD_ROOT: /data/uploads
+      JUNIOR_SILVA_LOG_ROOT: /data/logs
 
       JUNIOR_SILVA_WORKSPACE_ROOT: /data/workspace
       PI_CODING_AGENT_DIR: /data/pi-agent
@@ -28,6 +29,7 @@ services:
       - junior_silva_v2_data:/data
       - ./junior-silva/artifacts:/data/artifacts
       - ./junior-silva/uploads:/data/uploads
+      - ./junior-silva/logs:/data/logs
 
       - ./junior-silva/workspace:/data/workspace
       - ./junior-silva/sessions:/data/sessions

@@ -13,9 +13,10 @@ import tarfile
 CHUNK = 8 * 1024 * 1024
 SECRET_NAME = re.compile(r"KEY|SECRET|TOKEN|PASSWORD|PASSWD|AUTH|CREDENTIAL|PRIVATE", re.I)
 TOKEN_LIKE = re.compile(r"^[A-Za-z0-9_\-.=+]{24,}$")
-# The only Junior Silva files the Pi image may hold: the scope rules its extensions use, and the
-# forward-only tool launcher. Everything else under junior-silva/ is bridge code.
-ALLOWED_CODE = {"app/junior-silva/core/legal-scope.mjs", "app/junior-silva/mcp/launcher.mjs"}
+# The only Junior Silva files the Pi image may hold: the 2 text-only modules its extensions import
+# (the scope rules, and the citation linking), and the forward-only tool launcher. Everything else
+# under junior-silva/ is bridge code.
+ALLOWED_CODE = {"app/junior-silva/core/legal-scope.mjs", "app/junior-silva/core/legal-research.mjs", "app/junior-silva/mcp/launcher.mjs"}
 
 env_file, *extra_files = sys.argv[1:]
 secrets = {}
@@ -82,5 +83,5 @@ def report(ok, text):
 
 report(not found, f"searched {searched} files and {len(extra_files)} history and settings files for the values of {len(secrets)} settings ({', '.join(sorted(secrets))}): " + (f"FOUND the values of {', '.join(sorted(found))}" if found else "none found"))
 report(not env_files, "no .env file in the image" if not env_files else f".env files: {', '.join(env_files[:5])}")
-report(not bridge_code, "no bridge code: under junior-silva/ only the scope rules and the forward-only launcher" if not bridge_code else f"bridge code found: {', '.join(bridge_code[:5])}{' …' if len(bridge_code) > 5 else ''}")
+report(not bridge_code, "no bridge code: under junior-silva/ only the scope rules, the citation linking and the forward-only launcher" if not bridge_code else f"bridge code found: {', '.join(bridge_code[:5])}{' …' if len(bridge_code) > 5 else ''}")
 sys.exit(failures)

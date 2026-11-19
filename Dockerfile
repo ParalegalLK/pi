@@ -26,7 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 # bayoo-docx adds Word comments to the standard python-docx API. The native
 # review renderer uses it to keep comments and highlights at source clauses.
-RUN python3 -m pip install --break-system-packages --no-cache-dir "bayoo-docx>=0.2.14"
+RUN python3 -m pip install --break-system-packages --no-cache-dir "pdf2docx==0.5.8" "bayoo-docx>=0.2.14"
 
 COPY package.json package-lock.json ./
 COPY packages ./packages
@@ -85,10 +85,11 @@ COPY --from=build /app/packages/coding-agent/schemas ./packages/coding-agent/sch
 COPY deploy/pi-libs/check-pi-packages.mjs /tmp/check-pi-packages.mjs
 # Also removes npm's own logs from the steps above. They hold no secrets, but don't belong in the image.
 RUN node /tmp/check-pi-packages.mjs && rm -rf /tmp/check-pi-packages.mjs /root/.npm
-# Only the 4 hosted extensions, and the one bridge file two of them import.
+# Only the 4 hosted extensions, and the 2 bridge files they import. Both only work on text, and
+# import nothing themselves.
 COPY .pi/extensions/junior-silva-legal-context.ts .pi/extensions/junior-silva-scope-guard.ts \
      .pi/extensions/legal-research-citation-delivery.ts .pi/extensions/librechat-preview-delivery.ts ./.pi/extensions/
-COPY junior-silva/core/legal-scope.mjs ./junior-silva/core/legal-scope.mjs
+COPY junior-silva/core/legal-scope.mjs junior-silva/core/legal-research.mjs ./junior-silva/core/
 # Pi's tool helper only forwards tool calls to the bridge, and holds no tool code. It goes where
 # .pi/mcp.json already looks.
 COPY .pi/mcp.json ./.pi/mcp.json

@@ -13,6 +13,9 @@ services:
       JUNIOR_SILVA_DATA_ROOT: /data
       JUNIOR_SILVA_ARTIFACT_ROOT: /data/artifacts
       JUNIOR_SILVA_UPLOAD_ROOT: /data/uploads
+      # Request traces (core/trace.mjs) sit in the data folder too. The runner gives each Pi only its
+      # own chat's folders, so no Pi can read them.
+      JUNIOR_SILVA_LOG_ROOT: /data/logs
 
       JUNIOR_SILVA_WORKSPACE_ROOT: /data/workspace
       PI_CODING_AGENT_DIR: /data/pi-agent

@@ -2,6 +2,17 @@
 
 This is a factual implementation history for engineers continuing work on Junior Silva V2. It intentionally excludes credentials, user files, session contents, and deployment-specific values.
 
+## 2026-10 to 2026-11 — source selection, review quality and layout
+
+- Added named-instrument guidance to the legal research skill, product prompt and direct-source/RAG/web tool descriptions. This addresses models confusing historical similarly named Bills with an enacted amendment while retaining Pi's discretion over source selection. Focused MCP and direct-source tests passed; live model behaviour must still be evaluated independently.
+- Improved native review anchors and duplicate handling: distinct issues can use `issue_key`; headings are rejected as anchors for normal findings but can be used as documented placement points for missing protections. The existing substantive-review checkpoint continues to require the user's actual response.
+- Replaced fixed review labels with three document-appropriate categories selected by Pi and mapped to red, orange and yellow. The finaliser validates the declared categories and the renderer uses them in the comments, cover and Markdown report. Legacy fixed-category callers retain a compatibility path.
+- Changed DOCX annotation to split selected runs rather than clear whole paragraphs. This preserves unaffected formatting and produces one comment across a multi-run anchor. Original footers are no longer overwritten.
+- Added PDF-to-DOCX reconstruction using `pdf2docx` before annotation, with a notice and extracted-text fallback when reconstruction fails. PDFs are converted rather than losslessly recovered; scanned and complex layouts need particular care. `pdf_conversion_smoke.py` checks conversion, comments, embedded graphics and section properties.
+- Added coloured circles and separation for the cover legend. Corrected cover table cell widths in addition to the column grid, and gave the cover and appended clause-by-clause findings separate one-inch-margin sections so source-page settings remain independent. A synthetic review was rendered and visually inspected for cover and findings layout; the existing review tests and PDF smoke test passed.
+- Updated review guidance to allow Pi to draw on RAG, direct legal-source retrieval and public web sources as appropriate. RAG remains useful for legal analysis; no new mandatory research order was added.
+- Updated Overview and Architecture to reflect the current Pi package version, review flow, tracing and upload limitations. The MCP descriptions in Architecture are a dated snapshot; the running MCP tool schema remains authoritative.
+
 ## Stateful LibreChat attachment delivery and upload deduplication
 
 - LibreChat uses normal OpenAI-compatible, history-bearing requests while Junior Silva V2 reuses one Pi session per authenticated user-conversation key. The prior bridge consequently scanned historical request messages, re-downloaded earlier attachments, created random duplicate upload copies, and supplied all retained files to Pi on every turn.

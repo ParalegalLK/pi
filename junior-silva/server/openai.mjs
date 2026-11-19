@@ -5,10 +5,12 @@ import { constants, existsSync } from "node:fs";
 import { appendFile, copyFile, mkdir, mkdtemp, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import codingAgentPackage from "../../packages/coding-agent/package.json" with { type: "json" };
 import { createChatFolders, resolveChatScope, runInChat } from "../core/chat-scope.mjs";
 import { artifactsRoot, env, projectRoot, requiredEnv } from "../core/environment.mjs";
 import { mimeType, publishWorkspaceArtifact, resolveArtifactRequest, safeFilename } from "../core/files.mjs";
 import { newestRequestedArtifact, requestedSlideCount } from "../core/artifact-delivery.mjs";
+import { createRequestTrace } from "../core/trace.mjs";
 import { arrivedOnPiNetwork, GATEWAY_PORT, startGateway } from "./gateway.mjs";
 import { loadModelChoices, modelChoice, piModelsCatalog } from "./model-choice.mjs";
 import { MODEL_PROVIDERS } from "./model-proxy.mjs";
@@ -24,6 +26,7 @@ const MAX_BODY = Number(env("JUNIOR_SILVA_MAX_BODY_BYTES", String(60 * 1024 * 10
 const MAX_FILE = Number(env("JUNIOR_SILVA_MAX_FILE_BYTES", String(50 * 1024 * 1024)));
 const AGENT_ROOT = path.resolve(env("PI_CODING_AGENT_DIR", path.join(path.dirname(artifactsRoot), "pi-agent")));
 const PI_CLI = path.join(projectRoot, "packages", "coding-agent", "dist", "bundle", "cli.js");
+const PI_VERSION = codingAgentPackage.version;
 const ATTACHMENT_ORIGINS = new Set(env("JUNIOR_SILVA_ATTACHMENT_ORIGINS").split(",").map((item) => item.trim()).filter(Boolean));
 const auditRoot = path.join(path.dirname(artifactsRoot), "audit");
 // How Pi starts for each message (pi-executor.mjs): "container", in its own gVisor container through
@@ -211,6 +214,25 @@ async function saveUploads(directory, candidates, extracted) {
 	}
 	await writeFile(uploadManifestPath(directory), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
 	return paths;
+}
+
+// What the trace records about a chat's uploads: name, place, size and checksum, never the contents.
+// A file that disappears meanwhile is recorded without a size, so the trace can't fail the message.
+async function describeUploads(directory, paths, newPaths = paths) {
+	const manifest = await loadUploadManifest(directory);
+	const byFilename = new Map(Object.entries(manifest.files).map(([sha256, entry]) => [entry.filename, { sha256, ...entry }]));
+	const newPathSet = new Set(newPaths);
+	return Promise.all(paths.map(async (file) => {
+		const details = byFilename.get(path.basename(file));
+		const info = await stat(file).catch(() => undefined);
+		return {
+			original_name: details?.originalName || path.basename(file),
+			stored_path: file,
+			size_bytes: info?.size,
+			sha256: details?.sha256,
+			new_this_request: newPathSet.has(file),
+		};
+	}));
 }
 
 async function conversationUploadPaths(directory) {
@@ -560,7 +582,8 @@ async function startPi({ requestId, requestWorkspace, sessionId, chat, prompt, t
 }
 
 // One run of Pi. makePrompt(requestWorkspace) builds the prompt for this run's own message folder.
-async function runPiOnce({ requestId, makePrompt, sessionId, onProgress, chat, signal, choice }) {
+// trace is the message's trace (core/trace.mjs), and attempt names this run in it.
+async function runPiOnce({ requestId, makePrompt, sessionId, onProgress, chat, signal, choice, trace, attempt = "initial" }) {
 	const requestWorkspace = path.join(chat.folders.workspace, "requests", requestId);
 	const sessionSizesBefore = await sessionFileSizes(chat.folders.sessions);
 	const startedAt = Date.now();
@@ -573,7 +596,8 @@ async function runPiOnce({ requestId, makePrompt, sessionId, onProgress, chat, s
 		const { runToken, pi } = await startPi({ requestId, requestWorkspace, sessionId, chat, prompt: makePrompt(requestWorkspace), timeoutMs, signal, cleanUps, choice });
 		// Which model and level this run used, for the trace. Never any chat text.
 		void audit(sessionId, { type: "run", requestId, provider: choice.provider, model: choice.model, thinking: choice.thinking }).catch(() => {});
-		return await new Promise((resolve, reject) => {
+		void trace?.attempt("started", { attempt, request_id: requestId, session_id: sessionId });
+		const result = await new Promise((resolve, reject) => {
 			// The service-level SSE keepalive is intentionally invisible. This bounded
 			// timer is different: it tells the user that Pi is still alive when a
 			// legitimate document or research step produces no lifecycle event.
@@ -608,6 +632,12 @@ async function runPiOnce({ requestId, makePrompt, sessionId, onProgress, chat, s
 							stopReason = undefined;
 						}
 						thoughtController.handle(event);
+						// The trace keeps each tool call and model reply in full, with secrets hidden, for
+						// administrators only. Nothing here goes back to the user.
+						if (event.type === "tool_execution_start") void trace?.toolStart(event);
+						if (event.type === "tool_execution_update") void trace?.toolUpdate(event);
+						if (event.type === "tool_execution_end") void trace?.toolEnd(event);
+						if (event.type === "message_end" && event.message?.role === "assistant") void trace?.assistantMessage(event.message);
 						if (event.type === "tool_execution_start") {
 							const tool = event.toolName || event.tool_name;
 							void audit(sessionId, { type: "tool", tool: safeAuditToolName(tool), status: "started" }).catch(() => {});
@@ -661,6 +691,13 @@ async function runPiOnce({ requestId, makePrompt, sessionId, onProgress, chat, s
 				}).catch(reject);
 			});
 		});
+		if (result.noStart) void trace?.attempt("error", { attempt, error: "Pi didn't start in time" });
+		else void trace?.attempt("completed", { attempt, elapsed_ms: result.elapsedMs, artifact_published: result.artifactPublished });
+		return result;
+	} catch (error) {
+		// Every other ending: a timeout, a stop, no free slot, an exit code, or no answer.
+		void trace?.attempt("error", { attempt, error: error?.message || String(error) });
+		throw error;
 	} finally {
 		for (const cleanUp of cleanUps.reverse()) await cleanUp();
 	}
@@ -673,7 +710,7 @@ async function runPi(options) {
 	const first = await runPiOnce(options);
 	if (!first.noStart) return first;
 	console.error(`[junior-silva-v2] Pi didn't start in time for chat ${options.chat.chatHash}, so it gets one more try.`);
-	const second = await runPiOnce({ ...options, requestId: `chatcmpl-${randomUUID()}` });
+	const second = await runPiOnce({ ...options, requestId: `chatcmpl-${randomUUID()}`, attempt: `${options.attempt || "initial"}_retry` });
 	if (second.noStart) throw new Error("Pi didn't start in time, twice");
 	return second;
 }
@@ -699,7 +736,7 @@ async function publishRecoveredArtifact(candidate, instruction) {
 	return publication;
 }
 
-async function recoverUndeliveredArtifact({ instruction, chat, sessionId, initial, onProgress, signal, choice }) {
+async function recoverUndeliveredArtifact({ instruction, chat, sessionId, initial, onProgress, signal, choice, trace }) {
 	if (initial.artifactPublished) return initial;
 	// The folder of the run that answered, which a retry may have changed.
 	const { requestWorkspace } = initial;
@@ -720,6 +757,8 @@ async function recoverUndeliveredArtifact({ instruction, chat, sessionId, initia
 		signal,
 		// The repair uses the same model and level the user chose.
 		choice,
+		trace,
+		attempt: "artifact_recovery",
 	}).catch(() => undefined);
 	if (repair?.artifactPublished) return repair;
 	if (signal.aborted) return initial;
@@ -809,6 +848,7 @@ await rm(RUNS_ROOT, { recursive: true, force: true });
 await mkdir(RUNS_ROOT, { recursive: true, mode: 0o700 });
 const server = createServer(async (req, res) => {
 	let heartbeat;
+	let trace;
 	// LibreChat's Stop button closes this connection, and nobody can receive an answer after that.
 	const stop = new AbortController();
 	res.once("close", () => {
@@ -819,7 +859,7 @@ const server = createServer(async (req, res) => {
 		// In P3 Pi shares a network with the bridge, so it could reach this port. Its door is the gateway.
 		if (arrivedOnPiNetwork(req.socket.localAddress)) return json(res, 403, { error: "Not allowed" });
 		const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
-		if (req.method === "GET" && url.pathname === "/health") return json(res, 200, { status: "ok", service: MODEL, pi: "1.0.0" });
+		if (req.method === "GET" && url.pathname === "/health") return json(res, 200, { status: "ok", service: MODEL, pi: PI_VERSION });
 		if (req.method === "GET" && url.pathname === "/ready") return json(res, 200, { ready: existsSync(PI_CLI), mcp: existsSync(path.join(projectRoot, ".pi", "mcp.json")) });
 		if (req.method === "GET" && url.pathname.startsWith("/files/")) return await serveArtifact(res, url.pathname, url.searchParams.get("exp"));
 		if (url.pathname.startsWith("/v1/") && !authorized(req)) return json(res, 401, { error: { message: "Unauthorized", type: "authentication_error" } });
@@ -837,17 +877,25 @@ const server = createServer(async (req, res) => {
 			const candidates = fileCandidates(body);
 			if (!uploadText.instruction && !uploadText.files.length && !candidates.length) return json(res, 400, { error: { message: "A user message or document is required", type: "invalid_request_error" } });
 			const chat = { ...scope, folders: await createChatFolders(scope) };
-			const files = await saveUploads(chat.folders.uploads, candidates, uploadText.files);
 			const id = `chatcmpl-${randomUUID()}`;
+			const sessionId = `junior-silva-v2-${key}`;
+			// The message's trace sits outside every chat's folders, so no Pi can read it. The chat's
+			// key is its hash, and the model and level are the ones the user chose.
+			trace = createRequestTrace({ requestId: id, sessionId, conversationKey: key, source: "openai", model: choice.model, provider: choice.provider, thinking: choice.thinking });
+			await trace.start({ original_query: uploadText.instruction, stream: body.stream !== false, attachment_input_mode: uploadText.files.length ? "upload_as_text" : candidates.length ? "provider_upload" : "none" });
+			const files = await saveUploads(chat.folders.uploads, candidates, uploadText.files);
+			const retainedFiles = await conversationUploadPaths(chat.folders.uploads);
+			await trace.attachments(await describeUploads(chat.folders.uploads, retainedFiles, files), retainedFiles.length);
 			const streaming = body.stream !== false;
 			const includeStreamUsage = requestsStreamUsage(body);
 			if (streaming) { startStream(res, id); heartbeat = setInterval(() => res.write(": keep-alive\n\n"), 15_000); }
 			const onProgress = (message) => { if (streaming) streamDelta(res, id, "reasoning_content", `${message}\n`); };
-			const sessionId = `junior-silva-v2-${key}`;
 			const result = await serial(key, () => runInChat(chat, async () => {
-				const initial = await runPi({ requestId: id, makePrompt: (requestWorkspace) => piPrompt(uploadText.instruction, files, requestWorkspace), sessionId, onProgress, chat, signal: stop.signal, choice });
-				return recoverUndeliveredArtifact({ instruction: uploadText.instruction, chat, sessionId, initial, onProgress, signal: stop.signal, choice });
+				const initial = await runPi({ requestId: id, makePrompt: (requestWorkspace) => piPrompt(uploadText.instruction, files, requestWorkspace), sessionId, onProgress, chat, signal: stop.signal, choice, trace });
+				return recoverUndeliveredArtifact({ instruction: uploadText.instruction, chat, sessionId, initial, onProgress, signal: stop.signal, choice, trace });
 			}));
+			const delivered = trace.delivery();
+			await trace.finish({ outcome: "completed", answer: result.answer, usage: result.usage, elapsedMs: result.elapsedMs, artifacts: delivered.artifacts, previews: delivered.previews });
 			if (heartbeat) clearInterval(heartbeat);
 			if (streaming) return finishStream(res, id, result.answer, includeStreamUsage ? result.usage : undefined);
 			return json(res, 200, { id, object: "chat.completion", created: Math.floor(Date.now() / 1000), model: MODEL, choices: [{ index: 0, message: { role: "assistant", content: result.answer }, finish_reason: "stop" }], ...(result.usage ? { usage: result.usage } : {}) });
@@ -855,6 +903,8 @@ const server = createServer(async (req, res) => {
 		return json(res, 404, { error: { message: "Not found", type: "invalid_request_error" } });
 	} catch (error) {
 		if (heartbeat) clearInterval(heartbeat);
+		// The trace records every ending. Its "error" outcome covers a stop too, which the message says.
+		await trace?.finish({ outcome: "error", error: stop.signal.aborted ? "The connection closed before the answer was ready" : error?.message || String(error) });
 		// Nobody is waiting for an answer, and a stop isn't a failure.
 		if (stop.signal.aborted) return;
 		// Not a failure either, but a sign that more slots are needed.

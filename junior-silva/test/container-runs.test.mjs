@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -147,6 +147,17 @@ async function send(bridge, chat, text, headers = {}) {
 const answerOf = (reply) => reply.body.choices?.[0]?.message?.content;
 const chatRoot = (bridge, run) => path.join(bridge.root, "users", run.body.userHash, "chats", run.body.chatHash);
 const requestFolder = (bridge, run) => path.join(chatRoot(bridge, run), "workspace", "requests", run.body.requestId);
+
+// A message's trace (core/trace.mjs), from the bridge's log root: logs/traces/<UTC date>/<message ID>/.
+async function traceOf(bridge, requestId) {
+	const traces = path.join(bridge.root, "logs", "traces");
+	for (const day of await readdir(traces)) {
+		const folder = path.join(traces, day, requestId);
+		if (!existsSync(path.join(folder, "trace.json"))) continue;
+		return { folder, trace: JSON.parse(await readFile(path.join(folder, "trace.json"), "utf8")), events: await readFile(path.join(folder, "events.jsonl"), "utf8") };
+	}
+	assert.fail(`There's no trace for ${requestId}.`);
+}
 
 test("a chat is answered through the runner on a free slot, and the bridge doesn't make the message folder", async (t) => {
 	const runner = await standInRunner(t);
@@ -333,6 +344,42 @@ test("a file Pi made but didn't deliver gets a repair run with its own message I
 	assert.notEqual(repair.body.requestId, first.body.requestId, "the repair run gets its own message ID");
 	assert.ok(repair.body.prompt.startsWith(`A requested deliverable from your previous answer has not been delivered. Inspect only ${note}.`), repair.body.prompt);
 	assert.match(answerOf(reply), /The requested legal work product is ready\.[\s\S]*\[Download completed file\]\(http:\/\/127\.0\.0\.1:\d+\/files\//);
+});
+
+test("a message's trace records the chosen model, each tool and the answer, outside the chat's folders, and a failed one says error", async (t) => {
+	const runner = await standInRunner(t);
+	const bridge = await startBridge(t, runner, { JS_ALLOWED_MODELS: "anthropic/claude-sonnet-5-5,google/gemini-3.8-flash", GEMINI_API_KEY: "test-gemini-key" });
+	runner.queue.push((run) => {
+		run.start();
+		run.event({ type: "tool_execution_start", toolCallId: "call-1", toolName: "rag_chat_research", args: { question: "What is a lease?" } });
+		run.event({ type: "tool_execution_end", toolCallId: "call-1", toolName: "rag_chat_research", isError: false, result: { content: [{ type: "text", text: "Two authorities." }] } });
+		run.say("A lease is a contract.");
+		run.end(0, "done");
+	}, (run) => {
+		run.start();
+		run.end(2, "done");
+	});
+	const reply = await send(bridge, "chat-traced-0001", "What is a lease?", { "X-Pi-Model": "google/gemini-3.8-flash", "X-Pi-Thinking": "high" });
+	assert.equal(reply.status, 200, JSON.stringify(reply.body));
+	const [run] = runner.runs;
+	const traced = await traceOf(bridge, reply.body.id);
+	assert.ok(!traced.folder.startsWith(`${path.join(bridge.root, "users")}${path.sep}`), "no chat's folders hold a trace, and they're all a Pi gets");
+	assert.equal(traced.trace.trace.outcome, "completed");
+	assert.equal(traced.trace.trace.conversation_key, run.body.chatHash);
+	assert.deepEqual([traced.trace.request.provider, traced.trace.request.model, traced.trace.request.thinking], ["google", "gemini-3.8-flash", "high"], "the user's choice, not the default model");
+	assert.equal(traced.trace.request.original_query, "What is a lease?");
+	assert.deepEqual(traced.trace.tool_calls.map((call) => [call.name, call.status]), [["rag_chat_research", "completed"]]);
+	assert.equal(traced.trace.llm_calls.length, 1);
+	assert.equal(traced.trace.final.answer, "A lease is a contract.");
+	assert.match(traced.events, /"type":"pi_attempt_started"[^\n]*"attempt":"initial"/);
+	assert.match(traced.events, /"type":"pi_attempt_completed"/);
+
+	const failed = await send(bridge, "chat-traced-0002", "hello");
+	assert.equal(failed.status, 500);
+	const failedTrace = await traceOf(bridge, runner.runs[1].body.requestId);
+	assert.equal(failedTrace.trace.trace.outcome, "error");
+	assert.match(failedTrace.trace.final.error, /Pi exited with code 2/);
+	assert.match(failedTrace.events, /"type":"pi_attempt_error"/);
 });
 
 test("the bridge refuses to start with a wrong Pi setting, and says which", async () => {
