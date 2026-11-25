@@ -1,0 +1,8 @@
+# Isolation check only (scripts/js-isolation-check.sh), used together with docker-compose.yml. The runner
+# is told to start Pi from an image that doesn't exist, to prove a missing image means no run at all, never
+# an unsandboxed one. The check puts the normal settings back when it ends; if it can't, run
+# `docker compose up -d` in pi/.
+services:
+  junior-silva-runner:
+    environment:
+      JS_PI_IMAGE: junior-silva-pi:isolation-check-missing

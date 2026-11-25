@@ -1,8 +1,8 @@
 .git
-.env
-node_modules
-junior-silva/node_modules
-packages/**/node_modules
+**/.env
+**/node_modules
+**/__pycache__
+**/*.pyc
 packages/**/dist
 junior-silva/artifacts
 junior-silva/uploads
@@ -10,6 +10,10 @@ junior-silva/sessions
 junior-silva/audit
 junior-silva/pi-agent
 junior-silva/workspace
+junior-silva/users
+junior-silva/logs
 *.log
 .vscode
 .idea
+scripts/js-*
+scripts/spike

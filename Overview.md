@@ -108,14 +108,20 @@ pi/
 │   │   ├── typesense-legal-sources.mjs      bounded direct legal-source detail retrieval
 │   │   └── time.mjs                         Colombo temporal context for current-source research
 │   ├── mcp/
+│   │   ├── launcher.mjs                     Pi's tool helper on the laptop: sends tool calls to the bridge
+│   │   ├── sandbox-launcher.mjs             Pi's tool helper in the Pi image: forwards only, no tool code
 │   │   └── server.mjs                       MCP protocol implementation and tool declarations
 │   ├── review/
 │   │   ├── render_review_docx.py            source-anchored DOCX comments/highlights renderer
 │   │   └── render_review_docx.ps1           Windows/WSL renderer wrapper
+│   ├── runner/
+│   │   ├── docker-args.mjs                  the fixed Docker settings for one Pi run
+│   │   ├── server.mjs                       the runner: starts and stops Pi containers for the bridge
+│   │   └── slots.mjs                        the slot networks, and keeping the bridge connected to them
 │   ├── server/
-│   │   └── openai.mjs                       OpenAI bridge, HMAC conversation sessions, upload manifest/deduplication and SSE progress
+│   │   ├── openai.mjs                       OpenAI bridge, HMAC conversation sessions, upload manifest/deduplication and SSE progress
+│   │   └── pi-executor.mjs                  starts each message's Pi: in its own container through the runner, or locally for development
 │   ├── services/
-│   │   ├── code-runner.mjs                  isolated JSON-only JavaScript transformation runner
 │   │   ├── drafter.mjs                      legacy adapter retained temporarily; not exposed by production MCP
 │   │   ├── preview.mjs                      presentation adapter around core/previews
 │   │   ├── rag.mjs                          RAG Chat Server adapter and authority extraction
@@ -133,13 +139,15 @@ pi/
 │       ├── trace.test.mjs                   structured local trace tests
 │       ├── time.test.mjs                    Colombo temporal-context tests
 │       ├── typesense-legal-sources.test.mjs direct-source contract tests
+│       ├── isolation/                       the isolation check's probe, attack model and image scan (scripts/js-isolation-check.sh)
 │       └── fixtures/                        non-sensitive test fixtures
 ├── .dockerignore                            keeps secrets/runtime data out of Docker context
 ├── .env                                     local/server secrets; ignored by Git
 ├── .env.example                             safe configuration template
 ├── .gitignore                               excludes secrets, sessions, uploads and artifacts
-├── Dockerfile                               Pi build plus V2 runtime image
-├── docker-compose.yml                       HTTP service and optional interactive CLI profile
+├── Dockerfile                               bridge image, and the Pi sandbox image (target pi-sandbox)
+├── docker-compose.yml                       the bridge, the runner, and how the Pi image is built
+├── docker-compose.dev.yml                   developer-only interactive CLI, with no sandbox
 ├── Start-JuniorSilvaV2.ps1                  Windows Pi launcher
 ├── Start-JuniorSilvaV2.sh                   Linux/WSL Pi launcher
 ├── Setup-JuniorSilvaV2.ps1                  Windows setup and optional Docker runner
@@ -197,7 +205,6 @@ All tools are declared in junior-silva/mcp/server.mjs and exposed directly by .p
 | translator_siriwardena_translate_document | Translates a supported document. | Returns localized generated files where the service provides them. |
 | translator_siriwardena_translate_text | Translates supplied text. | Avoids unnecessary document drafting. |
 | web_search_public_legal_sources | Searches current public legal/news sources. | No client personal facts in query; use RAG too when current sources may change stable law. |
-| code_runner_data_transform | Executes a small deterministic JavaScript calculation/table transform. | No network, filesystem, modules, shell, or document creation. |
 | workbench_publish_artifact | Publishes a final skill-created workspace artifact. | Only final user-facing artifact files in the configured workspace. |
 | librechat_prepare_document_preview | Generates a side-panel preview for a final artifact. | Preview once per primary final file; never replaces the original download. |
 
@@ -237,7 +244,7 @@ librechat_prepare_document_preview supports DOCX, PDF, PPTX, XLSX, Markdown, TXT
 
 The copied .agents/skills are deliberately available to Pi. Current CLI and hosted bridge launches **do not pass the no-builtin-tools flag**. This allows Pi to read skill instructions and run their scripts/code for legal work products such as presentations, spreadsheets, PDFs and documents.
 
-That is functional but it is a material deployment boundary: the legal-scope extension is an agent-policy guardrail, not a security sandbox. A production deployment that accepts untrusted public users should isolate the Pi process, writable workspace and egress at the container/host level, and should not rely solely on prompts to protect the repository or secrets. The MCP code_runner_data_transform tool is separately constrained and is not equivalent to Pi’s built-in execution capabilities.
+That is functional but it is a material deployment boundary: the legal-scope extension is an agent-policy guardrail, not a security sandbox. A production deployment that accepts untrusted public users should isolate the Pi process, writable workspace and egress at the container/host level, and should not rely solely on prompts to protect the repository or secrets.
 
 ## Configuration and data paths
 
@@ -245,7 +252,7 @@ That is functional but it is a material deployment boundary: the legal-scope ext
 
 | Group | Examples | Purpose |
 | --- | --- | --- |
-| Pi model | PI_PROVIDER, PI_MODEL, provider API key | Pi’s reasoning model. |
+| Pi model | JS_ALLOWED_MODELS, PI_PROVIDER, PI_MODEL, PI_THINKING, provider API keys | Pi’s reasoning model. In the hosted bridge the keys stay in the bridge: Pi calls the bridge’s model proxy with a run token, and the proxy adds the key. The bridge supports Anthropic (`ANTHROPIC_API_KEY`) and Google Gemini (`GEMINI_API_KEY`). LibreChat users pick a model from `JS_ALLOWED_MODELS`, and an effort level that model supports, for each message (headers `X-Pi-Model` and `X-Pi-Thinking`; the list with each model's levels is at `GET /v1/pi/models`). `PI_PROVIDER`, `PI_MODEL` and `PI_THINKING` are the default for a message that picks nothing. Each run's token allows only the model it was started with. |
 | legal services | RAG_*, TRANSLATOR_* | Active external legal-research and translation endpoints. Legacy Reviewer/Drafter variables may remain during migration but are not used by the production MCP server. |
 | direct source detail | JUNIOR_TYPESENSE_*, JUNIOR_LEX_LEGISLATION_* | Optional bounded detail behind RAG-cited cases, passages and books (source-scoped Typesense) plus original Acts/constitutional material and exact sections (Lex API using an internal read-only `X-API-Key`). These values never reach Pi or the user. |
 | private precedents | JUNIOR_SILVA_KB_ROOT, JUNIOR_SILVA_KB_HOST_PATH | Optional host-mounted, read-only Drafter precedent corpus; never copied into the image or repository. |
@@ -274,18 +281,27 @@ On first use, approve the project MCP server. The interactive client uses the sa
 
 ### Docker HTTP endpoint
 
+Compose runs two services. The bridge (`junior-silva-v2`) holds the keys and serves LibreChat. The runner (`junior-silva-runner`), the only part with Docker access, starts each message's Pi in its own gVisor container from the `junior-silva-pi:local` image, and removes it afterwards. Docker needs gVisor (`scripts/js-install-gvisor.sh`), and `.env` needs:
+
+- `JS_RUNNER_SECRET`: at least 32 characters, from `openssl rand -hex 32`
+- `JS_HOST_DATA_ROOT`: the host folder that holds every chat's folders, outside the repository. Create it first, with mode 700 and owned by user 1000
+- `JS_DOCKER_GID`: the Docker group's number, from `getent group docker | cut -d: -f3`
+
 ~~~bash
 cd '/mnt/d/Intern/Work/Junior Silva V2/pi'
-docker compose build junior-silva-v2
-docker compose up -d --force-recreate junior-silva-v2
-docker compose ps junior-silva-v2
+docker compose build                    # the bridge and the runner
+docker compose build junior-silva-pi    # the Pi image, when its files change; the first build is slow
+docker compose up -d
+docker compose ps
 curl http://127.0.0.1:8132/health
 ~~~
 
-The container listens on 8126; Compose publishes it as 127.0.0.1:8132. The optional interactive container is started with:
+The bridge listens on 8126; Compose publishes it as 127.0.0.1:8132. Pi's model and tool calls use port 8127 on the bridge's private slot addresses, which is never published. The runner has no published port either: only the bridge reaches it, on the internal `js-control` network.
+
+The optional interactive container is for one developer on their own machine. It runs Pi with every key and no sandbox, so it is in a separate file that a server never uses:
 
 ~~~bash
-docker compose --profile cli run --rm junior-silva-cli
+docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile cli run --rm junior-silva-cli
 ~~~
 
 Compose connects to librechat_default and rag-chat-server_default external Docker networks by default. The active external service hostnames are RAG Chat Server and Translator; legacy Reviewer/Drafter endpoint configuration can be removed after operational migration.

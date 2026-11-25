@@ -10,6 +10,9 @@ import { finalizeReviewDocument, prepareReviewDocumentSet, recordReviewCheckpoin
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
+// These tests call tools directly on temporary files, like the native CLI does.
+process.env.JS_NATIVE_DEV = "1";
+
 function run(command, args) {
 	return new Promise((resolve, reject) => {
 		execFile(command, args, (error, stdout, stderr) => error ? reject(new Error(stderr || error.message)) : resolve(stdout));

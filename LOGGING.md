@@ -4,7 +4,9 @@ Junior Silva writes one structured trace for each OpenAI-compatible request and 
 
 ## Location
 
-The default location is `junior-silva/logs/traces/<UTC-date>/<request-id>/` in a native checkout. Docker mounts the same host directory at `/data/logs`, so traces survive a container recreation.
+The default location is `junior-silva/logs/traces/<UTC-date>/<request-id>/` in a native checkout.
+
+In Docker, the bridge writes them to `/data/logs`, inside its data folder. That's the host folder named by `JS_HOST_DATA_ROOT` in `.env`, so the traces survive a container recreation, at `$JS_HOST_DATA_ROOT/logs/traces/` on the host. Each message's Pi container gets only its own chat's folders, so no Pi can read a trace. The data folder is mode 700 and owned by user 1000, so read the traces as that user, or with sudo.
 
 Set these optional `.env` values to control logging:
 
@@ -35,11 +37,13 @@ Large strings are capped at `JUNIOR_SILVA_LOG_MAX_VALUE_BYTES` and recorded with
 
 ```bash
 cd ~/app/junior-silva-v2
-find junior-silva/logs/traces -name trace.json -printf '%T@ %p\n' | sort -nr | head
+# The data folder from .env. This prints nothing.
+traces="$(grep '^JS_HOST_DATA_ROOT=' .env | cut -d= -f2-)/logs/traces"
+find "$traces" -name trace.json -printf '%T@ %p\n' | sort -nr | head
 
 # Replace the path with one from the previous command.
-jq '.' junior-silva/logs/traces/2026-10-27/chatcmpl-.../trace.json
-tail -f junior-silva/logs/traces/2026-10-27/chatcmpl-.../events.jsonl
+jq '.' "$traces/2026-10-27/chatcmpl-.../trace.json"
+tail -f "$traces/2026-10-27/chatcmpl-.../events.jsonl"
 ```
 
 ## Viewing local traces
@@ -56,14 +60,14 @@ The **Tools used** section is expandable and contains the redacted request, prog
 
 ## Importing deployed-server traces into the local viewer
 
-Server traces use the identical schema. The Compose deployment bind-mounts the trace directory to the server checkout, so copy it directly from the server into one stable local import directory, then refresh the viewer. The reader scans recursively, so no code or configuration change is required.
+Server traces use the identical schema. The Compose deployment keeps them in the server's data folder, at `<JS_HOST_DATA_ROOT>/logs/traces`: replace `<JS_HOST_DATA_ROOT>` below with the value in the server's `.env`. Copy them directly from the server into one stable local import directory, then refresh the viewer. The reader scans recursively, so no code or configuration change is required.
 
 ### Copy it to the Windows development machine
 
 In Windows PowerShell:
 
 ```powershell
-$serverTraceRoot = '~/app/junior-silva-v2/junior-silva/logs/traces'
+$serverTraceRoot = '<JS_HOST_DATA_ROOT>/logs/traces'
 $localImport = 'D:\Intern\Work\Junior Silva V2\pi\junior-silva\logs\traces\server-chat-dev'
 
 New-Item -ItemType Directory -Force -Path $localImport | Out-Null
@@ -78,7 +82,7 @@ If the `chat-dev` SSH alias is configured only in WSL (rather than in Windows `%
 ```bash
 local_import='/mnt/d/Intern/Work/Junior Silva V2/pi/junior-silva/logs/traces/server-chat-dev'
 mkdir -p "$local_import"
-scp -r 'chat-dev:~/app/junior-silva-v2/junior-silva/logs/traces/.' "$local_import"
+scp -r 'chat-dev:<JS_HOST_DATA_ROOT>/logs/traces/.' "$local_import"
 find "$local_import" -type f -name trace.json | wc -l
 ```
 

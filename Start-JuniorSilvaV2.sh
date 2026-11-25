@@ -31,6 +31,7 @@ if [[ -z "$workspace_root" ]]; then
 fi
 mkdir -p "$workspace_root"
 export JUNIOR_SILVA_WORKSPACE_ROOT="$workspace_root"
+export JS_NATIVE_DEV=1
 
 for name in JUNIOR_SILVA_KB_ROOT JUNIOR_SILVA_DATA_ROOT JUNIOR_SILVA_ARTIFACT_ROOT JUNIOR_SILVA_UPLOAD_ROOT; do
   value="$(env_value "$name")"

@@ -7,6 +7,9 @@ const REDACTED = "[REDACTED]";
 const DEFAULT_MAX_VALUE_BYTES = 256 * 1024;
 const SENSITIVE_QUERY_VALUE = /([?&](?:api[_-]?key|authorization|secret|token|password|signature|x-amz-signature)=)[^&#\s]+/gi;
 const DIRECT_SECRET = /\b(?:sk-[A-Za-z0-9_-]{16,}|AIza[A-Za-z0-9_-]{16,})\b/g;
+// A download link carries its signature in its path, /files/<signature>/... (core/files.mjs), and works
+// for days. Hidden, so a copied trace can't fetch a client's file.
+const LINK_SIGNATURE = /(\/files\/)[0-9a-f]{64}(?=\/)/gi;
 
 function isSensitiveKey(key) {
 	const normalized = String(key || "").replace(/([a-z])([A-Z])/g, "$1_$2").toLowerCase();
@@ -41,7 +44,7 @@ function secretValues() {
 function redactText(value) {
 	let output = String(value || "");
 	for (const secret of secretValues()) output = output.split(secret).join(REDACTED);
-	return output.replace(SENSITIVE_QUERY_VALUE, `$1${REDACTED}`).replace(DIRECT_SECRET, REDACTED);
+	return output.replace(SENSITIVE_QUERY_VALUE, `$1${REDACTED}`).replace(DIRECT_SECRET, REDACTED).replace(LINK_SIGNATURE, `$1${REDACTED}`);
 }
 
 function truncateText(value, limit) {

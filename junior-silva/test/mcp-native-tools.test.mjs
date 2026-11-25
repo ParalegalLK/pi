@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { compactToolResult, mcpTools } from "../mcp/server.mjs";
+import { compactToolResult, dispatchMcpRequest, mcpTools } from "../mcp/server.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -39,6 +39,13 @@ test("MCP exposes native legal review and drafting tools instead of external rev
 	for (const name of ["legal_read_document_set", "legal_build_clause_inventory", "legal_audit_commercial_coverage", "legal_validate_review_findings", "legal_render_review_report"]) assert.ok(!names.has(name), name);
 	assert.ok(!names.has("reviewer_perera_start_review"));
 	assert.ok(!names.has("drafter_weeramantry_draft_or_revise"));
+});
+
+test("the code runner is gone, so Pi can't see it or call it by name", async () => {
+	assert.ok(!mcpTools.some((tool) => tool.name === "code_runner_data_transform"));
+	const reply = await dispatchMcpRequest({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "code_runner_data_transform", arguments: { code: "return 1;" } } });
+	assert.equal(reply.error?.code, -32602);
+	assert.match(reply.error.message, /^Unknown tool/);
 });
 
 test("MCP keeps review HTML in structured content and gives Pi compact download metadata", () => {

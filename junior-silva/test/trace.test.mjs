@@ -51,3 +51,10 @@ test("redaction removes credential-shaped values from nested payloads", () => {
 	assert.equal(value.authorization, "[REDACTED]");
 	assert.equal(value.url, "https://example.test/file?signature=[REDACTED]");
 });
+
+test("a download link's signature is hidden, so a copied trace can't fetch the file", () => {
+	const rest = `${"cd".repeat(16)}/${"ef".repeat(16)}/review-1/Reviewed_lease.docx?exp=1767225600000`;
+	const value = redactTraceValue({ download_url: `https://example.test/files/${"ab".repeat(32)}/${rest}`, text: `[Download](https://example.test/files/${"AB".repeat(32)}/${rest})` });
+	assert.equal(value.download_url, `https://example.test/files/[REDACTED]/${rest}`);
+	assert.equal(value.text, `[Download](https://example.test/files/[REDACTED]/${rest})`);
+});

@@ -1,18 +1,21 @@
 #!/usr/bin/env node
-import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
-import { spawn } from "node:child_process";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
-import { existsSync } from "node:fs";
-import { appendFile, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { constants, existsSync } from "node:fs";
+import { appendFile, copyFile, mkdir, mkdtemp, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import codingAgentPackage from "../../packages/coding-agent/package.json" with { type: "json" };
-import { artifactsRoot, env, projectRoot, requiredEnv, uploadsRoot, workspaceRoot } from "../core/environment.mjs";
+import { createChatFolders, resolveChatScope, runInChat } from "../core/chat-scope.mjs";
+import { artifactsRoot, env, projectRoot, requiredEnv } from "../core/environment.mjs";
 import { mimeType, publishWorkspaceArtifact, resolveArtifactRequest, safeFilename } from "../core/files.mjs";
 import { newestRequestedArtifact, requestedSlideCount } from "../core/artifact-delivery.mjs";
-import { preparePreview } from "../core/previews.mjs";
 import { createRequestTrace } from "../core/trace.mjs";
-import { dispatchMcpRequest } from "../mcp/server.mjs";
+import { arrivedOnPiNetwork, GATEWAY_PORT, startGateway } from "./gateway.mjs";
+import { loadModelChoices, modelChoice, piModelsCatalog } from "./model-choice.mjs";
+import { MODEL_PROVIDERS } from "./model-proxy.mjs";
+import { createSlotPool, piAddress, startContainerPi, startLocalPi } from "./pi-executor.mjs";
+import { bearerToken, createRunToken, revokeRunToken } from "./run-tokens.mjs";
 import { addAssistantUsage, createUsageTotals, openAiUsage, requestsStreamUsage } from "./usage.mjs";
 
 const PORT = Number(env("JUNIOR_SILVA_PORT", "8126"));
@@ -21,12 +24,30 @@ const MODEL = env("JUNIOR_SILVA_MODEL_NAME", "junior-silva-v2");
 const API_KEY = requiredEnv("JUNIOR_SILVA_API_KEY");
 const MAX_BODY = Number(env("JUNIOR_SILVA_MAX_BODY_BYTES", String(60 * 1024 * 1024)));
 const MAX_FILE = Number(env("JUNIOR_SILVA_MAX_FILE_BYTES", String(50 * 1024 * 1024)));
-const SESSION_ROOT = path.join(path.dirname(artifactsRoot), "sessions");
 const AGENT_ROOT = path.resolve(env("PI_CODING_AGENT_DIR", path.join(path.dirname(artifactsRoot), "pi-agent")));
 const PI_CLI = path.join(projectRoot, "packages", "coding-agent", "dist", "bundle", "cli.js");
 const PI_VERSION = codingAgentPackage.version;
 const ATTACHMENT_ORIGINS = new Set(env("JUNIOR_SILVA_ATTACHMENT_ORIGINS").split(",").map((item) => item.trim()).filter(Boolean));
 const auditRoot = path.join(path.dirname(artifactsRoot), "audit");
+// How Pi starts for each message (pi-executor.mjs): "container", in its own gVisor container through
+// the runner, or "local", inside this container, for development only. The start checks are below.
+const PI_EXECUTOR = env("JS_PI_EXECUTOR", "container");
+const RUNNER_URL = env("JS_RUNNER_URL");
+const RUNNER_SECRET = env("JS_RUNNER_SECRET");
+// The same number of slots as the runner has.
+const SLOT_COUNT = Number(env("JS_SLOTS", "3"));
+// How long a message waits for a free slot before it gets the busy answer.
+const SLOT_WAIT_MS = Number(env("JS_SLOT_WAIT_MS", "300000"));
+// Made once the settings above are checked.
+let slotPool;
+// In the local way, Pi runs inside this container.
+const LOCAL_PI_ADDRESS = "127.0.0.1";
+// Each run gets its own settings folder in here, removed when the run ends.
+const RUNS_ROOT = path.join(path.dirname(artifactsRoot), "pi-runs");
+// Pi fills in $JS_RUN_TOKEN from its own settings when it calls the model, so the token is never
+// written to disk. The proxy swaps it for the real key. Both providers point at the proxy, which lets
+// each run call only the provider and model it was started with (P3.18).
+const PI_MODELS_SETTINGS = `${JSON.stringify({ providers: Object.fromEntries(Object.keys(MODEL_PROVIDERS).map((provider) => [provider, { baseUrl: `http://${LOCAL_PI_ADDRESS}:${GATEWAY_PORT}/model/${provider}`, apiKey: "$JS_RUN_TOKEN" }])) }, null, 2)}\n`;
 
 function json(res, status, value) {
 	const body = JSON.stringify(value);
@@ -35,8 +56,7 @@ function json(res, status, value) {
 }
 
 function authorized(req) {
-	const supplied = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
-	const left = Buffer.from(supplied);
+	const left = Buffer.from(bearerToken(req));
 	const right = Buffer.from(API_KEY);
 	return left.length === right.length && timingSafeEqual(left, right);
 }
@@ -132,13 +152,6 @@ async function fetchFile(candidate) {
 	return { bytes, filename: safeFilename(candidate.name || path.basename(parsed.pathname), `uploaded-document${extensionForMime(response.headers.get("content-type"))}`) };
 }
 
-function conversationKey(req, body) {
-	const conversation = req.headers["x-librechat-conversation-id"] || body.conversationId || body.conversation_id;
-	const user = req.headers["x-librechat-user-id"] || "anonymous";
-	const stable = conversation || createHash("sha256").update(JSON.stringify(body.messages || [])).digest("hex").slice(0, 24);
-	return createHmac("sha256", API_KEY).update(`${user}:${stable}`).digest("hex").slice(0, 32);
-}
-
 function uploadManifestPath(directory) {
 	return path.join(directory, ".manifest.json");
 }
@@ -181,8 +194,7 @@ async function retainUpload(directory, manifest, { bytes, filename, sourceId = "
 	return { path: target, isNew };
 }
 
-async function saveUploads(key, candidates, extracted) {
-	const directory = path.join(uploadsRoot, key);
+async function saveUploads(directory, candidates, extracted) {
 	await mkdir(directory, { recursive: true });
 	const manifest = await loadUploadManifest(directory);
 	const paths = [];
@@ -204,26 +216,26 @@ async function saveUploads(key, candidates, extracted) {
 	return paths;
 }
 
-async function describeUploads(key, paths, newPaths = paths) {
-	const directory = path.join(uploadsRoot, key);
+// What the trace records about a chat's uploads: name, place, size and checksum, never the contents.
+// A file that disappears meanwhile is recorded without a size, so the trace can't fail the message.
+async function describeUploads(directory, paths, newPaths = paths) {
 	const manifest = await loadUploadManifest(directory);
 	const byFilename = new Map(Object.entries(manifest.files).map(([sha256, entry]) => [entry.filename, { sha256, ...entry }]));
 	const newPathSet = new Set(newPaths);
 	return Promise.all(paths.map(async (file) => {
 		const details = byFilename.get(path.basename(file));
-		const info = await stat(file);
+		const info = await stat(file).catch(() => undefined);
 		return {
 			original_name: details?.originalName || path.basename(file),
 			stored_path: file,
-			size_bytes: info.size,
+			size_bytes: info?.size,
 			sha256: details?.sha256,
 			new_this_request: newPathSet.has(file),
 		};
 	}));
 }
 
-async function conversationUploadPaths(key) {
-	const directory = path.join(uploadsRoot, key);
+async function conversationUploadPaths(directory) {
 	try {
 		const entries = await readdir(directory, { withFileTypes: true });
 		return entries.filter((entry) => entry.isFile() && !entry.name.startsWith(".")).map((entry) => path.join(directory, entry.name)).sort();
@@ -250,7 +262,6 @@ const safeToolProgress = Object.freeze({
 	web_search_public_legal_sources: "Checking current public legal sources and recent developments…",
 	translator_siriwardena_translate_document: "Translating the document while preserving its legal meaning…",
 	translator_siriwardena_translate_text: "Translating the supplied text while preserving its legal meaning…",
-	code_runner_data_transform: "Calculating and organising the requested legal information…",
 	workbench_publish_artifact: "Preparing the completed file for secure download…",
 	librechat_prepare_document_preview: "Preparing an in-chat preview of the completed document…",
 });
@@ -428,30 +439,40 @@ function safeAuditToolName(toolName) {
 			/^(write|edit|create_file|apply_patch)$/i.test(raw) ? "builtin_write" : "builtin_or_unrecognized");
 }
 
-function agentEnvironment(requestWorkspace = workspaceRoot) {
-	const output = {
-		PATH: process.env.PATH || "",
+// Pi's settings hold no model key: its model calls go through the bridge's model proxy with the run token.
+function agentEnvironment(folders, requestWorkspace, runToken, settingsFolder) {
+	return {
+		// Pi downloaded rg and fd into the shared folder's bin once. It looks there and on PATH.
+		PATH: [process.env.PATH, path.join(AGENT_ROOT, "bin")].filter(Boolean).join(path.delimiter),
 		HOME: process.env.HOME || "",
 		LANG: process.env.LANG || "C.UTF-8",
 		TERM: process.env.TERM || "xterm-256color",
 		TZ: "Asia/Colombo",
-		PI_CODING_AGENT_SESSION_DIR: SESSION_ROOT,
-		PI_CODING_AGENT_DIR: AGENT_ROOT,
+		PI_CODING_AGENT_SESSION_DIR: folders.sessions,
+		PI_CODING_AGENT_DIR: settingsFolder,
 		PI_SKIP_VERSION_CHECK: "1",
-		JUNIOR_SILVA_MCP_GATEWAY_URL: `http://127.0.0.1:${PORT}/internal/mcp`,
+		// No catalog refreshes or downloads. Model calls and tools aren't affected.
+		PI_OFFLINE: "1",
+		PI_TELEMETRY: "0",
+		JUNIOR_SILVA_MCP_GATEWAY_URL: `http://${LOCAL_PI_ADDRESS}:${GATEWAY_PORT}/internal/mcp`,
+		JS_RUN_TOKEN: runToken,
 		JUNIOR_SILVA_DATA_ROOT: path.dirname(artifactsRoot),
-		JUNIOR_SILVA_ARTIFACT_ROOT: artifactsRoot,
-		JUNIOR_SILVA_UPLOAD_ROOT: uploadsRoot,
+		JUNIOR_SILVA_ARTIFACT_ROOT: folders.artifacts,
+		JUNIOR_SILVA_UPLOAD_ROOT: folders.uploads,
 		JUNIOR_SILVA_WORKSPACE_ROOT: requestWorkspace,
 	};
-	const provider = env("PI_PROVIDER", "google");
-	if (provider === "anthropic" && process.env.ANTHROPIC_API_KEY) output.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-	if (provider === "google" && process.env.GEMINI_API_KEY) output.GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-	return output;
 }
 
-function loopback(req) {
-	return ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(String(req.socket.remoteAddress || ""));
+// A fresh settings folder for each run, so a run can't leave changed settings behind for the next one,
+// which may be another user's. It has no auth.json, so no stored key can outrank the run token. It has
+// no mcp.json either: Pi takes its tools from the project's .pi/mcp.json, which would win anyway.
+async function createPiSettings() {
+	const folder = await mkdtemp(path.join(RUNS_ROOT, "run-"));
+	await Promise.all([
+		writeFile(path.join(folder, "models.json"), PI_MODELS_SETTINGS, { mode: 0o600 }),
+		...["settings.json", "models-store.json"].map((name) => copyFile(path.join(AGENT_ROOT, name), path.join(folder, name)).catch(() => {})),
+	]);
+	return folder;
 }
 
 async function audit(sessionId, event) {
@@ -460,13 +481,13 @@ async function audit(sessionId, event) {
 	await appendFile(path.join(auditRoot, `${sessionId}.jsonl`), `${line}\n`, "utf8");
 }
 
-async function sessionFileSizes() {
+async function sessionFileSizes(directory) {
 	const sizes = new Map();
 	try {
-		const entries = await readdir(SESSION_ROOT, { withFileTypes: true });
+		const entries = await readdir(directory, { withFileTypes: true });
 		for (const entry of entries) {
 			if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
-			const file = path.join(SESSION_ROOT, entry.name);
+			const file = path.join(directory, entry.name);
 			sizes.set(file, (await stat(file)).size);
 		}
 	} catch (caught) {
@@ -475,14 +496,14 @@ async function sessionFileSizes() {
 	return sizes;
 }
 
-async function appendedSessionUsage(sizesBefore) {
+async function appendedSessionUsage(directory, sizesBefore) {
 	const totals = createUsageTotals();
 	let changedFiles = 0;
 	try {
-		const entries = await readdir(SESSION_ROOT, { withFileTypes: true });
+		const entries = await readdir(directory, { withFileTypes: true });
 		for (const entry of entries) {
 			if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
-			const file = path.join(SESSION_ROOT, entry.name);
+			const file = path.join(directory, entry.name);
 			const offset = sizesBefore.get(file) || 0;
 			if ((await stat(file)).size <= offset) continue;
 			changedFiles += 1;
@@ -501,7 +522,22 @@ async function appendedSessionUsage(sizesBefore) {
 	return changedFiles === 1 ? totals : undefined;
 }
 
-async function runPi(prompt, sessionId, onProgress, requestWorkspace = workspaceRoot, trace, attempt = "initial") {
+const NOT_COMPLETE_NOTE = "**This answer isn't complete.** The AI service stopped before it finished, so please don't rely on the text below. Send your message again to retry, and contact the administrator if this keeps happening.";
+const CUT_OFF_NOTE = "**This answer was cut off** because it reached the length limit, so it's incomplete. You can ask me to continue.";
+const NO_ANSWER_NOTE = "**I couldn't finish this answer.** The AI service stopped before it wrote anything. Send your message again to retry, and contact the administrator if this keeps happening.";
+
+// Pi exits as a success even when a model call fails, so only its last message says how the
+// run ended. Only "stop" means finished. No stop reason means an extension answered without
+// a model call. The notes are fixed text, because LibreChat shows error text word for word.
+function finishedAnswer(text, stopReason) {
+	const answer = text.trim();
+	if (stopReason === undefined || stopReason === "stop") return answer;
+	if (!answer) return NO_ANSWER_NOTE;
+	if (stopReason === "length") return `${answer}\n\n---\n\n${CUT_OFF_NOTE}`;
+	return `${NOT_COMPLETE_NOTE}\n\n---\n\n${answer}`;
+}
+
+function localPiArgs(sessionId, choice) {
 	// Hosted Pi uses administrator-owned legal MCP registration. Its normal built-in
 	// tools remain subject to the legal-scope extension and deployment sandbox.
 	const args = [
@@ -514,95 +550,169 @@ async function runPi(prompt, sessionId, onProgress, requestWorkspace = workspace
 		"--extension", path.join(projectRoot, ".pi", "extensions", "legal-research-citation-delivery.ts"),
 		"--extension", path.join(projectRoot, ".pi", "extensions", "librechat-preview-delivery.ts"),
 	];
-	if (env("PI_PROVIDER")) args.push("--provider", env("PI_PROVIDER"));
-	if (env("PI_MODEL")) args.push("--model", env("PI_MODEL"));
-	if (env("PI_THINKING")) args.push("--thinking", env("PI_THINKING"));
-	args.push(prompt);
-	await mkdir(SESSION_ROOT, { recursive: true });
-	const sessionSizesBefore = await sessionFileSizes();
+	args.push("--provider", choice.provider, "--model", choice.model, "--thinking", choice.thinking);
+	return args;
+}
+
+// Starts Pi for one run: through the runner on a free slot (the container way, the default), or as a
+// process here (the local way, development only). The run token is tied to the address Pi calls from.
+// Whatever has to be undone when the run ends is added to cleanUps. choice is the message's model and
+// effort level (model-choice.mjs), and the run token records the model, so the model proxy allows only it.
+async function startPi({ requestId, requestWorkspace, sessionId, chat, prompt, timeoutMs, signal, cleanUps, choice }) {
+	const model = { provider: choice.provider, id: choice.model };
+	if (PI_EXECUTOR === "local") {
+		// In the container way, Pi's start-up script makes this folder. Here the bridge does, as before P3.
+		await mkdir(requestWorkspace, { recursive: true });
+		const settingsFolder = await createPiSettings();
+		cleanUps.push(() => rm(settingsFolder, { recursive: true, force: true }));
+		const runToken = createRunToken(chat, timeoutMs, LOCAL_PI_ADDRESS, model);
+		cleanUps.push(() => revokeRunToken(runToken));
+		signal.throwIfAborted();
+		const environment = agentEnvironment(chat.folders, requestWorkspace, runToken, settingsFolder);
+		return { runToken, pi: startLocalPi({ command: process.execPath, args: localPiArgs(sessionId, choice), cwd: projectRoot, environment, prompt }) };
+	}
+	const slot = await slotPool.take(signal);
+	cleanUps.push(() => slotPool.release(slot));
+	// The token only works from this slot's Pi container, so a stolen one is useless anywhere else.
+	const runToken = createRunToken(chat, timeoutMs, piAddress(slot), model);
+	cleanUps.push(() => revokeRunToken(runToken));
+	signal.throwIfAborted();
+	const run = { requestId, userHash: chat.userHash, chatHash: chat.chatHash, slot, runToken, provider: choice.provider, model: choice.model, thinking: choice.thinking };
+	return { runToken, pi: startContainerPi({ runnerUrl: RUNNER_URL, runnerSecret: RUNNER_SECRET, run, prompt }) };
+}
+
+// One run of Pi. makePrompt(requestWorkspace) builds the prompt for this run's own message folder.
+// trace is the message's trace (core/trace.mjs), and attempt names this run in it.
+async function runPiOnce({ requestId, makePrompt, sessionId, onProgress, chat, signal, choice, trace, attempt = "initial" }) {
+	const requestWorkspace = path.join(chat.folders.workspace, "requests", requestId);
+	const sessionSizesBefore = await sessionFileSizes(chat.folders.sessions);
 	const startedAt = Date.now();
-	trace?.attempt("started", { attempt, session_id: sessionId });
 	const thoughtController = createThoughtController(onProgress);
-	return new Promise((resolve, reject) => {
-		const child = spawn(process.execPath, args, { cwd: projectRoot, env: agentEnvironment(requestWorkspace), stdio: ["ignore", "pipe", "pipe"] });
-		// The service-level SSE keepalive is intentionally invisible. This bounded
-		// timer is different: it tells the user that Pi is still alive when a
-		// legitimate document or research step produces no lifecycle event.
-		const thoughtLivenessTimer = setInterval(() => thoughtController.tick(), 5_000);
-		let buffer = "";
-		let stderr = "";
-		let finalText = "";
-		let artifactPublished = false;
-		const usageTotals = createUsageTotals();
-		const usageResponseIds = new Set();
-		const recordAssistantUsage = (message) => {
-			if (!message?.usage) return;
-			const key = message.responseId || `${message.timestamp || ""}:${message.usage.totalTokens || ""}:${message.usage.input || ""}:${message.usage.output || ""}`;
-			if (usageResponseIds.has(key)) return;
-			usageResponseIds.add(key);
-			addAssistantUsage(usageTotals, message.usage);
-		};
-		child.stdout.on("data", (chunk) => {
-			buffer += chunk.toString();
-			const lines = buffer.split(/\r?\n/);
-			buffer = lines.pop() || "";
-			for (const line of lines) {
-				try {
-					const event = JSON.parse(line);
-					if (event.type === "tool_execution_start") void trace?.toolStart(event);
-					if (event.type === "tool_execution_update") void trace?.toolUpdate(event);
-					if (event.type === "tool_execution_end") void trace?.toolEnd(event);
-					if (event.type === "message_end" && event.message?.role === "assistant") void trace?.assistantMessage(event.message);
-					if (event.type === "message_update" && event.assistantMessageEvent?.type === "message_end") {
-						recordAssistantUsage({ ...event.assistantMessageEvent.message, usage: event.usage });
-					}
-					if (event.type === "message_end" && event.message?.role === "custom" && event.message?.customType === "junior-silva-scope" && typeof event.message?.content === "string") finalText = event.message.content;
-					thoughtController.handle(event);
-					if (event.type === "tool_execution_start") {
-						const tool = event.toolName || event.tool_name;
-						void audit(sessionId, { type: "tool", tool: safeAuditToolName(tool), status: "started" }).catch(() => {});
-					}
-					// Never relay update payloads: built-in tools can include shell output,
-					// files, URLs, source text, credentials, or internal service responses.
-					if (event.type === "tool_execution_end") {
-						const tool = event.toolName || event.tool_name;
-						if (!event.isError && /(?:^|__|\/)workbench_publish_artifact$/.test(String(tool || ""))) artifactPublished = true;
-						void audit(sessionId, { type: "tool", tool: safeAuditToolName(tool), status: event.isError ? "error" : "completed" }).catch(() => {});
-					}
-					if (event.type === "message" && event.message?.role === "assistant") recordAssistantUsage(event.message);
-					if (event.type === "message_end" && event.message?.role === "assistant") {
-						finalText = (event.message.content || []).filter((part) => part.type === "text").map((part) => part.text || "").join("\n");
-						recordAssistantUsage(event.message);
-					}
-				} catch { }
-			}
+	const timeoutMs = Number(env("JUNIOR_SILVA_PI_TIMEOUT_MS", "1200000"));
+	const cleanUps = [];
+	try {
+		// A message whose connection closed while it waited in the queue never starts Pi.
+		signal.throwIfAborted();
+		const { runToken, pi } = await startPi({ requestId, requestWorkspace, sessionId, chat, prompt: makePrompt(requestWorkspace), timeoutMs, signal, cleanUps, choice });
+		// Which model and level this run used, for the trace. Never any chat text.
+		void audit(sessionId, { type: "run", requestId, provider: choice.provider, model: choice.model, thinking: choice.thinking }).catch(() => {});
+		void trace?.attempt("started", { attempt, request_id: requestId, session_id: sessionId });
+		const result = await new Promise((resolve, reject) => {
+			// The service-level SSE keepalive is intentionally invisible. This bounded
+			// timer is different: it tells the user that Pi is still alive when a
+			// legitimate document or research step produces no lifecycle event.
+			const thoughtLivenessTimer = setInterval(() => thoughtController.tick(), 5_000);
+			let buffer = "";
+			let finalText = "";
+			let stopReason;
+			let failure;
+			let stopError;
+			let artifactPublished = false;
+			const usageTotals = createUsageTotals();
+			const usageResponseIds = new Set();
+			const recordAssistantUsage = (message) => {
+				if (!message?.usage) return;
+				const key = message.responseId || `${message.timestamp || ""}:${message.usage.totalTokens || ""}:${message.usage.input || ""}:${message.usage.output || ""}`;
+				if (usageResponseIds.has(key)) return;
+				usageResponseIds.add(key);
+				addAssistantUsage(usageTotals, message.usage);
+			};
+			pi.stdout.on("data", (chunk) => {
+				buffer += chunk.toString();
+				const lines = buffer.split(/\r?\n/);
+				buffer = lines.pop() || "";
+				for (const line of lines) {
+					try {
+						const event = JSON.parse(line);
+						if (event.type === "message_update" && event.assistantMessageEvent?.type === "message_end") {
+							recordAssistantUsage({ ...event.assistantMessageEvent.message, usage: event.usage });
+						}
+						if (event.type === "message_end" && event.message?.role === "custom" && event.message?.customType === "junior-silva-scope" && typeof event.message?.content === "string") {
+							finalText = event.message.content;
+							stopReason = undefined;
+						}
+						thoughtController.handle(event);
+						// The trace keeps each tool call and model reply in full, with secrets hidden, for
+						// administrators only. Nothing here goes back to the user.
+						if (event.type === "tool_execution_start") void trace?.toolStart(event);
+						if (event.type === "tool_execution_update") void trace?.toolUpdate(event);
+						if (event.type === "tool_execution_end") void trace?.toolEnd(event);
+						if (event.type === "message_end" && event.message?.role === "assistant") void trace?.assistantMessage(event.message);
+						if (event.type === "tool_execution_start") {
+							const tool = event.toolName || event.tool_name;
+							void audit(sessionId, { type: "tool", tool: safeAuditToolName(tool), status: "started" }).catch(() => {});
+						}
+						// Never relay update payloads: built-in tools can include shell output,
+						// files, URLs, source text, credentials, or internal service responses.
+						if (event.type === "tool_execution_end") {
+							const tool = event.toolName || event.tool_name;
+							if (!event.isError && /(?:^|__|\/)workbench_publish_artifact$/.test(String(tool || ""))) artifactPublished = true;
+							void audit(sessionId, { type: "tool", tool: safeAuditToolName(tool), status: event.isError ? "error" : "completed" }).catch(() => {});
+						}
+						if (event.type === "message" && event.message?.role === "assistant") recordAssistantUsage(event.message);
+						if (event.type === "message_end" && event.message?.role === "assistant") {
+							finalText = (event.message.content || []).filter((part) => part.type === "text").map((part) => part.text || "").join("\n");
+							stopReason = event.message.stopReason;
+							failure = event.message.errorMessage;
+							recordAssistantUsage(event.message);
+						}
+					} catch { }
+				}
+			});
+			const stopPi = (error) => {
+				if (stopError) return;
+				stopError = error;
+				revokeRunToken(runToken);
+				pi.stop();
+			};
+			const onStop = () => {
+				console.log(`[junior-silva-v2] Stopping the run for chat ${chat.chatHash}, because its connection closed.`);
+				stopPi(new Error("The run was stopped"));
+			};
+			const timeout = setTimeout(() => stopPi(new Error("Pi request timed out")), timeoutMs);
+			const cleanUp = () => {
+				clearTimeout(timeout);
+				clearInterval(thoughtLivenessTimer);
+				signal.removeEventListener("abort", onStop);
+			};
+			signal.addEventListener("abort", onStop, { once: true });
+			if (signal.aborted) onStop();
+			// Settling only here means the next message in this chat can't start while this Pi is still running.
+			void pi.done.then((ending) => {
+				cleanUp();
+				if (stopError) return reject(stopError);
+				if (ending.reason === "no-start") return resolve({ noStart: true });
+				if (ending.exitCode !== 0) return reject(new Error(`Pi exited with code ${ending.exitCode ?? "unknown"} (${ending.reason})${ending.detail ? `: ${ending.detail}` : ""}`));
+				const answer = finishedAnswer(finalText, stopReason);
+				if (!answer) return reject(new Error("Pi returned no final answer"));
+				if (stopReason !== undefined && stopReason !== "stop") console.error(`[junior-silva-v2] Pi's run for chat ${chat.chatHash} ended early: ${`${stopReason}: ${failure || "no details"}`.replace(/\s+/g, " ").slice(0, 320)}`);
+				void appendedSessionUsage(chat.folders.sessions, sessionSizesBefore).then((persistedUsage) => {
+					resolve({ answer, usage: openAiUsage(persistedUsage) || openAiUsage(usageTotals), elapsedMs: Date.now() - startedAt, artifactPublished, requestWorkspace });
+				}).catch(reject);
+			});
 		});
-		child.stderr.on("data", (chunk) => { stderr = `${stderr}${chunk.toString()}`.slice(-12_000); });
-		const timeout = setTimeout(() => {
-			clearInterval(thoughtLivenessTimer);
-			child.kill("SIGTERM");
-			void trace?.attempt("error", { attempt, error: "Pi request timed out" });
-			reject(new Error("Pi request timed out"));
-		}, Number(env("JUNIOR_SILVA_PI_TIMEOUT_MS", "1200000")));
-		child.on("error", (error) => { clearTimeout(timeout); clearInterval(thoughtLivenessTimer); void trace?.attempt("error", { attempt, error: error?.message || String(error) }); reject(error); });
-		child.on("close", (code) => {
-			clearTimeout(timeout);
-			clearInterval(thoughtLivenessTimer);
-			if (code !== 0) {
-				void trace?.attempt("error", { attempt, exit_code: code, stderr });
-				return reject(new Error(`Pi exited with code ${code}: ${stderr.replace(/\s+/g, " ").slice(0, 1200)}`));
-			}
-			if (!finalText.trim()) {
-				void trace?.attempt("error", { attempt, error: "Pi returned no final answer" });
-				return reject(new Error("Pi returned no final answer"));
-			}
-			void appendedSessionUsage(sessionSizesBefore).then((persistedUsage) => {
-				const result = { answer: finalText.trim(), usage: openAiUsage(persistedUsage) || openAiUsage(usageTotals), elapsedMs: Date.now() - startedAt, artifactPublished };
-				void trace?.attempt("completed", { attempt, elapsed_ms: result.elapsedMs, artifact_published: artifactPublished });
-				resolve(result);
-			}).catch(reject);
-		});
-	});
+		if (result.noStart) void trace?.attempt("error", { attempt, error: "Pi didn't start in time" });
+		else void trace?.attempt("completed", { attempt, elapsed_ms: result.elapsedMs, artifact_published: result.artifactPublished });
+		return result;
+	} catch (error) {
+		// Every other ending: a timeout, a stop, no free slot, an exit code, or no answer.
+		void trace?.attempt("error", { attempt, error: error?.message || String(error) });
+		throw error;
+	} finally {
+		for (const cleanUp of cleanUps.reverse()) await cleanUp();
+	}
+}
+
+// Runs Pi for a message. In the container way, a Pi that printed nothing in time gets one more try,
+// with a new message folder, because the first try may already have made its folder (P3.2 refuses
+// to reuse one).
+async function runPi(options) {
+	const first = await runPiOnce(options);
+	if (!first.noStart) return first;
+	console.error(`[junior-silva-v2] Pi didn't start in time for chat ${options.chat.chatHash}, so it gets one more try.`);
+	const second = await runPiOnce({ ...options, requestId: `chatcmpl-${randomUUID()}`, attempt: `${options.attempt || "initial"}_retry` });
+	if (second.noStart) throw new Error("Pi didn't start in time, twice");
+	return second;
 }
 
 function artifactDeliveryText(publication) {
@@ -612,34 +722,54 @@ function artifactDeliveryText(publication) {
 	return ["The requested legal work product is ready.", `## Files\n\n- [Download completed file](${url})`, markup].filter(Boolean).join("\n\n");
 }
 
-async function recoverUndeliveredArtifact({ instruction, requestWorkspace, sessionId, initial, onProgress, trace }) {
+// Publishes a file Pi made but didn't deliver. Publishing goes through the file guard
+// and makes its own preview. Any problem returns nothing, so the user still gets Pi's
+// own answer instead of an error.
+async function publishRecoveredArtifact(candidate, instruction) {
+	const publication = await publishWorkspaceArtifact(candidate).catch(() => undefined);
+	if (!publication) return undefined;
+	const slides = requestedSlideCount(instruction);
+	if (slides && path.extname(candidate).toLowerCase() === ".pptx" && !new RegExp(`>${slides} slides?\\.`).test(publication.artifact_markup)) {
+		await rm(path.dirname(publication.artifact.local_path), { recursive: true, force: true });
+		return undefined;
+	}
+	return publication;
+}
+
+async function recoverUndeliveredArtifact({ instruction, chat, sessionId, initial, onProgress, signal, choice, trace }) {
 	if (initial.artifactPublished) return initial;
+	// The folder of the run that answered, which a retry may have changed.
+	const { requestWorkspace } = initial;
 	let candidate = await newestRequestedArtifact(requestWorkspace, instruction);
 	if (!candidate) return initial;
 
 	// Give Pi one bounded opportunity to finish its own validation/repair and call
-	// the normal publishing tool. It stays inside the request workspace and does
-	// not repeat research simply because delivery was omitted.
+	// the normal publishing tool. It does not repeat research simply because
+	// delivery was omitted. The repair run has its own message ID and folder, since
+	// Pi's start-up script never reuses one, so the file is corrected where it is.
 	onProgress("Checking the generated file before delivery…");
-	const repair = await runPi(
-		`A requested deliverable exists in this request workspace but has not been delivered. Inspect only ${candidate}. If it needs correction, correct and validate it. Then call workbench_publish_artifact for the final file and finish with a concise delivery confirmation. Do not repeat legal research or return an internal progress note.`,
+	const repair = await runPi({
+		requestId: `chatcmpl-${randomUUID()}`,
+		makePrompt: () => `A requested deliverable from your previous answer has not been delivered. Inspect only ${candidate}. If it needs correction, correct and validate it in place. Then call workbench_publish_artifact for the final file and finish with a concise delivery confirmation. Do not repeat legal research or return an internal progress note.`,
 		sessionId,
 		onProgress,
-		requestWorkspace,
+		chat,
+		signal,
+		// The repair uses the same model and level the user chose.
+		choice,
 		trace,
-		"artifact_recovery",
-	).catch(() => undefined);
+		attempt: "artifact_recovery",
+	}).catch(() => undefined);
 	if (repair?.artifactPublished) return repair;
+	if (signal.aborted) return initial;
 
 	// Pi created a valid file but omitted the final tool call. Publish only a file
 	// from this request's private workspace; never guess from a shared workspace.
 	candidate = await newestRequestedArtifact(requestWorkspace, instruction);
 	if (!candidate) return initial;
 	onProgress("Preparing the completed file for secure download…");
-	const preview = await preparePreview(candidate);
-	const slides = requestedSlideCount(instruction);
-	if (slides && path.extname(candidate).toLowerCase() === ".pptx" && !new RegExp(`>${slides} slides?\\.`).test(preview.markup)) return initial;
-	const publication = await publishWorkspaceArtifact(candidate);
+	const publication = await publishRecoveredArtifact(candidate, instruction);
+	if (!publication?.artifact?.download_url) return initial;
 	return { ...initial, answer: artifactDeliveryText(publication), artifactPublished: true, recoveredArtifact: true };
 }
 
@@ -668,80 +798,102 @@ function finishStream(res, id, answer, usage) {
 	res.end("data: [DONE]\n\n");
 }
 
-async function serveArtifact(res, pathname) {
-	const parts = pathname.split("/").filter(Boolean).map(decodeURIComponent);
-	if (parts.length !== 4 || parts[0] !== "files") return json(res, 404, { error: "Not found" });
-	const target = resolveArtifactRequest(parts[1], parts[2], parts[3]);
-	if (!target || !existsSync(target)) return json(res, 404, { error: "Not found" });
-	const bytes = await readFile(target);
+// This route is public, so a planted shortcut or FIFO must not be served through it.
+async function readPublishedFile(target) {
+	const handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK).catch(() => undefined);
+	if (!handle) return undefined;
+	try {
+		return (await handle.stat()).isFile() ? await handle.readFile() : undefined;
+	} finally {
+		await handle.close();
+	}
+}
+
+async function serveArtifact(res, pathname, expiresAt) {
+	let parts;
+	try { parts = pathname.split("/").filter(Boolean).map((part) => decodeURIComponent(part)); }
+	catch { return json(res, 404, { error: "Not found" }); }
+	if (parts.length !== 6 || parts[0] !== "files") return json(res, 404, { error: "Not found" });
+	const [, signature, userHash, chatHash, operationId, filename] = parts;
+	const { target, expired } = resolveArtifactRequest({ signature, userHash, chatHash, operationId, filename, expiresAt });
+	if (expired) return json(res, 410, { error: "This download link has expired. Ask for the file again." });
+	const bytes = target && await readPublishedFile(target);
+	if (!bytes) return json(res, 404, { error: "Not found" });
 	res.writeHead(200, { "Content-Type": mimeType(target), "Content-Length": bytes.length, "Content-Disposition": `attachment; filename="${safeFilename(path.basename(target))}"`, "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" });
 	res.end(bytes);
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
-await Promise.all([mkdir(artifactsRoot, { recursive: true }), mkdir(uploadsRoot, { recursive: true }), mkdir(workspaceRoot, { recursive: true }), mkdir(SESSION_ROOT, { recursive: true }), mkdir(AGENT_ROOT, { recursive: true }), mkdir(auditRoot, { recursive: true })]);
-// Hosted mode uses an administrator-owned global MCP registration. It does not
-// bypass Pi's project-trust prompt or approve arbitrary project-local code.
-await writeFile(path.join(AGENT_ROOT, "mcp.json"), `${JSON.stringify({
-	mcpServers: {
-		"junior-silva-legal": {
-			command: process.execPath,
-			args: [path.join(projectRoot, "junior-silva", "mcp", "launcher.mjs")],
-			cwd: projectRoot,
-			exposure: "direct",
-			timeout: 1200,
-			description: "Independent Sri Lankan legal research, native source-anchored review, native drafting, and translation tools.",
-		},
-	},
-}, null, 2)}\n`, "utf8");
+// Chat folder names and download links are built from these secrets, so never start without them.
+requiredEnv("JS_IDENTITY_SECRET");
+requiredEnv("JUNIOR_SILVA_ARTIFACT_SECRET");
+if (env("JS_NATIVE_DEV")) throw new Error("JS_NATIVE_DEV is only for the native CLI. Remove it from the bridge's settings.");
+// Pi's model calls go through the model proxy, which has a route for Anthropic and for Google only
+// (task/plan.md 3.8), and holds their real keys. Users pick from these models for each message (P3.18).
+const modelChoices = loadModelChoices();
+if (PI_EXECUTOR !== "container" && PI_EXECUTOR !== "local") throw new Error("JS_PI_EXECUTOR must be container or local.");
+if (PI_EXECUTOR === "local" && env("JS_ALLOW_LOCAL_PI") !== "1") throw new Error("JS_PI_EXECUTOR=local runs Pi inside the bridge, next to its keys and every chat's files, so it's for development only. Set JS_ALLOW_LOCAL_PI=1 to use it anyway.");
+if (PI_EXECUTOR === "container") {
+	if (!/^http:\/\/[A-Za-z0-9.-]+(?::\d{1,5})?\/?$/.test(RUNNER_URL)) throw new Error("JS_RUNNER_URL must be the runner's http address, such as http://junior-silva-runner:8128.");
+	if (RUNNER_SECRET.length < 32) throw new Error("JS_RUNNER_SECRET must be set, with at least 32 characters.");
+	if (!Number.isInteger(SLOT_COUNT) || SLOT_COUNT < 1 || SLOT_COUNT > 254) throw new Error("JS_SLOTS must be a whole number from 1 to 254, the same as the runner's.");
+	if (!Number.isInteger(SLOT_WAIT_MS) || SLOT_WAIT_MS < 0) throw new Error("JS_SLOT_WAIT_MS must be a whole number of milliseconds.");
+	slotPool = createSlotPool(SLOT_COUNT, SLOT_WAIT_MS);
+}
+// One user's failed request must not end the process serving every other user.
+process.on("unhandledRejection", (reason) => console.error(`[junior-silva-v2] Unhandled rejection: ${reason?.stack || reason}`));
+await Promise.all([mkdir(AGENT_ROOT, { recursive: true }), mkdir(auditRoot, { recursive: true })]);
+// Settings folders left behind by a crash aren't in use any more.
+await rm(RUNS_ROOT, { recursive: true, force: true });
+await mkdir(RUNS_ROOT, { recursive: true, mode: 0o700 });
 const server = createServer(async (req, res) => {
 	let heartbeat;
 	let trace;
+	// LibreChat's Stop button closes this connection, and nobody can receive an answer after that.
+	const stop = new AbortController();
+	res.once("close", () => {
+		clearInterval(heartbeat);
+		stop.abort();
+	});
 	try {
+		// In P3 Pi shares a network with the bridge, so it could reach this port. Its door is the gateway.
+		if (arrivedOnPiNetwork(req.socket.localAddress)) return json(res, 403, { error: "Not allowed" });
 		const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
 		if (req.method === "GET" && url.pathname === "/health") return json(res, 200, { status: "ok", service: MODEL, pi: PI_VERSION });
 		if (req.method === "GET" && url.pathname === "/ready") return json(res, 200, { ready: existsSync(PI_CLI), mcp: existsSync(path.join(projectRoot, ".pi", "mcp.json")) });
-		if (req.method === "GET" && url.pathname.startsWith("/files/")) return serveArtifact(res, url.pathname);
-		if (req.method === "POST" && url.pathname === "/internal/mcp") {
-			if (!loopback(req)) return json(res, 403, { error: "Local gateway only" });
-			const message = await requestBody(req);
-			const response = await dispatchMcpRequest(message);
-			if (!response) return json(res, 202, {});
-			return json(res, 200, response);
-		}
+		if (req.method === "GET" && url.pathname.startsWith("/files/")) return await serveArtifact(res, url.pathname, url.searchParams.get("exp"));
 		if (url.pathname.startsWith("/v1/") && !authorized(req)) return json(res, 401, { error: { message: "Unauthorized", type: "authentication_error" } });
 		if (req.method === "GET" && url.pathname === "/v1/models") return json(res, 200, { object: "list", data: [{ id: MODEL, object: "model", created: 0, owned_by: "paralegal.lk" }] });
+		// The models LibreChat's picker may offer, each with its own effort levels (P3.18).
+		if (req.method === "GET" && url.pathname === "/v1/pi/models") return json(res, 200, piModelsCatalog(modelChoices));
 		if (req.method === "POST" && url.pathname === "/v1/chat/completions") {
 			const body = await requestBody(req);
+			const scope = resolveChatScope(req.headers, body);
+			// The user's model and effort level, checked before anything starts.
+			const choice = modelChoice(req.headers, modelChoices);
+			const key = scope.chatHash;
 			const messages = Array.isArray(body.messages) ? body.messages : [];
 			const uploadText = textUploads(messages);
 			const candidates = fileCandidates(body);
 			if (!uploadText.instruction && !uploadText.files.length && !candidates.length) return json(res, 400, { error: { message: "A user message or document is required", type: "invalid_request_error" } });
-			const key = conversationKey(req, body);
+			const chat = { ...scope, folders: await createChatFolders(scope) };
 			const id = `chatcmpl-${randomUUID()}`;
-			trace = createRequestTrace({
-				requestId: id,
-				sessionId: `junior-silva-v2-${key}`,
-				conversationKey: key,
-				source: "openai",
-				model: MODEL,
-				provider: env("PI_PROVIDER", "google"),
-				thinking: env("PI_THINKING", "medium"),
-			});
+			const sessionId = `junior-silva-v2-${key}`;
+			// The message's trace sits outside every chat's folders, so no Pi can read it. The chat's
+			// key is its hash, and the model and level are the ones the user chose.
+			trace = createRequestTrace({ requestId: id, sessionId, conversationKey: key, source: "openai", model: choice.model, provider: choice.provider, thinking: choice.thinking });
 			await trace.start({ original_query: uploadText.instruction, stream: body.stream !== false, attachment_input_mode: uploadText.files.length ? "upload_as_text" : candidates.length ? "provider_upload" : "none" });
-			const files = await saveUploads(key, candidates, uploadText.files);
-			const retainedFiles = await conversationUploadPaths(key);
-			await trace.attachments(await describeUploads(key, retainedFiles, files), retainedFiles.length);
+			const files = await saveUploads(chat.folders.uploads, candidates, uploadText.files);
+			const retainedFiles = await conversationUploadPaths(chat.folders.uploads);
+			await trace.attachments(await describeUploads(chat.folders.uploads, retainedFiles, files), retainedFiles.length);
 			const streaming = body.stream !== false;
 			const includeStreamUsage = requestsStreamUsage(body);
-			const requestWorkspace = path.join(workspaceRoot, "requests", key, id);
-			await mkdir(requestWorkspace, { recursive: true });
 			if (streaming) { startStream(res, id); heartbeat = setInterval(() => res.write(": keep-alive\n\n"), 15_000); }
 			const onProgress = (message) => { if (streaming) streamDelta(res, id, "reasoning_content", `${message}\n`); };
-			const result = await serial(key, async () => {
-				const initial = await runPi(piPrompt(uploadText.instruction, files, requestWorkspace), `junior-silva-v2-${key}`, onProgress, requestWorkspace, trace);
-				return recoverUndeliveredArtifact({ instruction: uploadText.instruction, requestWorkspace, sessionId: `junior-silva-v2-${key}`, initial, onProgress, trace });
-			});
+			const result = await serial(key, () => runInChat(chat, async () => {
+				const initial = await runPi({ requestId: id, makePrompt: (requestWorkspace) => piPrompt(uploadText.instruction, files, requestWorkspace), sessionId, onProgress, chat, signal: stop.signal, choice, trace });
+				return recoverUndeliveredArtifact({ instruction: uploadText.instruction, chat, sessionId, initial, onProgress, signal: stop.signal, choice, trace });
+			}));
 			const delivered = trace.delivery();
 			await trace.finish({ outcome: "completed", answer: result.answer, usage: result.usage, elapsedMs: result.elapsedMs, artifacts: delivered.artifacts, previews: delivered.previews });
 			if (heartbeat) clearInterval(heartbeat);
@@ -751,8 +903,13 @@ const server = createServer(async (req, res) => {
 		return json(res, 404, { error: { message: "Not found", type: "invalid_request_error" } });
 	} catch (error) {
 		if (heartbeat) clearInterval(heartbeat);
-		await trace?.finish({ outcome: "error", elapsedMs: undefined, error: error?.message || String(error) });
-		console.error(`[junior-silva-v2] ${error?.stack || error}`);
+		// The trace records every ending. Its "error" outcome covers a stop too, which the message says.
+		await trace?.finish({ outcome: "error", error: stop.signal.aborted ? "The connection closed before the answer was ready" : error?.message || String(error) });
+		// Nobody is waiting for an answer, and a stop isn't a failure.
+		if (stop.signal.aborted) return;
+		// Not a failure either, but a sign that more slots are needed.
+		if (error?.busy) console.warn(`[junior-silva-v2] A message got the busy answer: no slot was free within ${SLOT_WAIT_MS} ms.`);
+		else console.error(`[junior-silva-v2] ${error?.stack || error}`);
 		const status = Number(error?.status || 500);
 		const message = status < 500 ? error.message : "Junior Silva could not complete this request. Please retry or contact the administrator.";
 		if (!res.headersSent) return json(res, status, { error: { message, type: "junior_silva_error" } });
@@ -760,7 +917,9 @@ const server = createServer(async (req, res) => {
 	}
 });
 
+// The gateway starts first, so "listening" means Pi's tool calls can be served too.
+await startGateway();
 server.listen(PORT, HOST, () => console.log(`[junior-silva-v2] listening on ${HOST}:${PORT}`));
 }
 
-export { conversationUploadPaths, fileCandidates, messageText, piPrompt, saveUploads, splitTextEnvelope, textUploads };
+export { agentEnvironment, conversationUploadPaths, fileCandidates, finishedAnswer, messageText, piPrompt, publishRecoveredArtifact, saveUploads, serveArtifact, splitTextEnvelope, textUploads };

@@ -261,7 +261,8 @@ Remove-Item .tmp-compose-config.yml
 
 $tests = Get-ChildItem -Path junior-silva/test -Filter '*.test.mjs' | ForEach-Object FullName
 node --test $tests
-docker compose build junior-silva-v2
+docker compose build                   # the bridge and the runner
+docker compose build junior-silva-pi   # the Pi image, which holds Pi itself
 ~~~
 
 Before committing, check staged files for secrets or generated user data:

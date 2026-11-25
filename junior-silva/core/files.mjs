@@ -1,12 +1,12 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
-import { copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { artifactsRoot, env, workspaceRoot } from "./environment.mjs";
+import { chatFolders, currentChat, readChatFile } from "./chat-scope.mjs";
+import { artifactsRoot, env, requiredEnv } from "./environment.mjs";
 import { download } from "./http.mjs";
 import { preparePreview } from "./previews.mjs";
 
-const MAX_INPUT_BYTES = 50 * 1024 * 1024;
 const INPUT_EXTENSIONS = new Set([".pdf", ".docx", ".doc", ".odt", ".pptx", ".xlsx", ".txt", ".md", ".json", ".png", ".jpg", ".jpeg"]);
 const MIME = new Map([
 	[".pdf", "application/pdf"],
@@ -24,12 +24,25 @@ const MIME = new Map([
 	[".jpeg", "image/jpeg"],
 ]);
 
-function artifactSecret() {
-	return env("JUNIOR_SILVA_ARTIFACT_SECRET", env("JUNIOR_SILVA_API_KEY", "junior-silva-local-artifacts"));
+const DEFAULT_LINK_HOURS = 168;
+const CHAT_HASH = /^[a-f0-9]{32}$/;
+
+// Covers every part of a download link, so changing any of them breaks the link.
+function linkSignature({ userHash, chatHash, operationId, filename, expiresAt }) {
+	const message = ["download", userHash, chatHash, operationId, filename, expiresAt].join("\0");
+	return createHmac("sha256", requiredEnv("JUNIOR_SILVA_ARTIFACT_SECRET")).update(message).digest("hex");
 }
 
-function capability(operationId, filename) {
-	return createHmac("sha256", artifactSecret()).update(`${operationId}\0${filename}`).digest("hex");
+function linkExpiry() {
+	const hours = Number(env("JS_LINK_TTL_HOURS", String(DEFAULT_LINK_HOURS)));
+	const lifetime = Number.isFinite(hours) && hours > 0 ? hours : DEFAULT_LINK_HOURS;
+	return Math.floor(Date.now() / 1000 + lifetime * 3600);
+}
+
+function downloadUrl(publicBase, { userHash, chatHash }, operationId, filename) {
+	const expiresAt = linkExpiry();
+	const signature = linkSignature({ userHash, chatHash, operationId, filename, expiresAt });
+	return `${publicBase}/files/${signature}/${userHash}/${chatHash}/${encodeURIComponent(operationId)}/${encodeURIComponent(filename)}?exp=${expiresAt}`;
 }
 
 function equalText(left, right) {
@@ -39,33 +52,25 @@ function equalText(left, right) {
 }
 
 export async function inputFile(filename) {
-	const absolute = path.resolve(filename);
-	const info = await stat(absolute);
-	if (!info.isFile()) throw new Error(`${absolute} is not a regular file`);
-	const extension = path.extname(absolute).toLowerCase();
-	if (!INPUT_EXTENSIONS.has(extension)) throw new Error(`${path.basename(absolute)} has an unsupported file type`);
-	const bytes = await readFile(absolute);
-	if (bytes.byteLength > MAX_INPUT_BYTES) throw new Error(`${path.basename(absolute)} exceeds the 50 MB input limit`);
-	return { absolute, name: path.basename(absolute), bytes, base64: Buffer.from(bytes).toString("base64") };
+	const file = await readChatFile(filename);
+	if (!INPUT_EXTENSIONS.has(path.extname(file.name).toLowerCase())) throw new Error(`${file.name} has an unsupported file type`);
+	return { ...file, base64: file.bytes.toString("base64") };
 }
 export async function operationDirectory(prefix) {
 	const id = `${prefix}-${randomUUID()}`;
-	const directory = path.join(artifactsRoot, id);
+	const directory = path.join(currentChat().folders.artifacts, id);
 	await mkdir(directory, { recursive: true });
 	return { id, directory };
 }
 
 export async function publishWorkspaceArtifact(filename, title) {
-	const source = path.resolve(String(filename || ""));
-	if (!source.startsWith(`${workspaceRoot}${path.sep}`) && !source.startsWith(`${artifactsRoot}${path.sep}`)) throw new Error("Only files created in Junior Silva's workspace can be published.");
-	const info = await stat(source);
-	if (!info.isFile() || info.size > MAX_INPUT_BYTES) throw new Error("The requested artifact is not a supported publishable file.");
-	const extension = path.extname(source).toLowerCase();
+	const source = await readChatFile(filename, { only: ["workspace", "artifacts"] });
+	const extension = path.extname(source.name).toLowerCase();
 	if (!new Set([".pptx", ".xlsx", ".docx", ".pdf", ".md", ".txt", ".json"]).has(extension)) throw new Error("Only PPTX, XLSX, DOCX, PDF, Markdown, text, and JSON files can be published.");
 	const operation = await operationDirectory("artifact");
-	const name = safeFilename(title ? `${title}${extension}` : path.basename(source), `legal-artifact${extension}`);
+	const name = safeFilename(title ? `${title}${extension}` : source.name, `legal-artifact${extension}`);
 	const destination = path.join(operation.directory, name);
-	await copyFile(source, destination);
+	await writeFile(destination, source.bytes);
 	// A published document is a completed user-facing deliverable.  Generate its
 	// preview here, rather than trusting the agent to invent HTML in its reply.
 	const preview = await preparePreview(destination, title);
@@ -123,8 +128,9 @@ export function mimeType(filename) {
 }
 
 export function describeArtifact(filename, operationId) {
+	const chat = currentChat();
 	const absolute = path.resolve(filename);
-	const root = path.resolve(artifactsRoot, operationId);
+	const root = path.resolve(chat.folders.artifacts, operationId);
 	if (absolute !== root && !absolute.startsWith(`${root}${path.sep}`)) throw new Error("Artifact is outside its operation directory");
 	const name = path.basename(absolute);
 	const publicBase = env("JUNIOR_SILVA_PUBLIC_URL").replace(/\/$/, "");
@@ -133,17 +139,20 @@ export function describeArtifact(filename, operationId) {
 		media_type: mimeType(name),
 		local_path: absolute,
 		file_uri: pathToFileURL(absolute).href,
-		...(publicBase ? { download_url: `${publicBase}/files/${capability(operationId, name)}/${encodeURIComponent(operationId)}/${encodeURIComponent(name)}` } : {}),
+		// The native CLI has no chat for the bridge to find the file in, so it only gets the local path.
+		...(publicBase && !chat.native ? { download_url: downloadUrl(publicBase, chat, operationId, name) } : {}),
 	};
 }
 
-export function resolveArtifactRequest(token, operationId, filename) {
-	if (!/^[-A-Za-z0-9]+$/.test(operationId) || path.basename(filename) !== filename) return undefined;
-	if (!equalText(token, capability(operationId, filename))) return undefined;
-	const root = path.resolve(artifactsRoot, operationId);
+// Returns { target } for a good link, { expired: true } for an expired one, and {} for anything
+// else. Expiry is only checked after the signature, so nobody can use it to test made-up links.
+export function resolveArtifactRequest({ signature, userHash, chatHash, operationId, filename, expiresAt }) {
+	if (!CHAT_HASH.test(userHash) || !CHAT_HASH.test(chatHash) || !/^[-A-Za-z0-9]+$/.test(operationId) || path.basename(filename) !== filename || !/^\d+$/.test(String(expiresAt))) return {};
+	if (!equalText(signature, linkSignature({ userHash, chatHash, operationId, filename, expiresAt }))) return {};
+	if (Number(expiresAt) * 1000 <= Date.now()) return { expired: true };
+	const root = path.resolve(chatFolders({ userHash, chatHash }).artifacts, operationId);
 	const target = path.resolve(root, filename);
-	if (!target.startsWith(`${root}${path.sep}`)) return undefined;
-	return target;
+	return target.startsWith(`${root}${path.sep}`) ? { target } : {};
 }
 
 export { artifactsRoot, safeFilename };

@@ -158,12 +158,6 @@ Search current public web sources when the question depends on a current Gazette
 
 Inputs: `query` (required), `max_results`.
 
-#### `code_runner_data_transform`
-
-Run a small JavaScript data transformation for calculations, schedules, tables, or structured analysis. This is an isolated data-only runner: no network, filesystem, modules, shell commands, or document creation. Code receives `input` and must return a JSON-serializable value. Use it when calculation or deterministic reshaping materially improves a legal work product; do not use it for ordinary prose.
-
-Inputs: `code` (required), `input`.
-
 #### `workbench_publish_artifact`
 
 Publish a completed legal artifact that Pi created with a document skill in Junior Silva's workspace. Call this only after the requested PPTX, XLSX, DOCX, PDF, Markdown, text, or JSON file has been validated. A file that merely exists in the workspace is not delivered: do not send the final answer until this tool returns its protected download URL. This tool also prepares a safe preview. Do not publish source scripts, temporary files, or files outside Junior Silva's workspace.
@@ -223,4 +217,4 @@ So, for example:
 
 - **Usage:** The same host aggregates Pi assistant usage from the session and emits OpenAI `usage` in normal responses, or a final streaming usage frame when LibreChat requests it.
 
-- **Code execution distinction:** `code_runner_data_transform` is intentionally restricted. Pi’s normal built-in `bash` tool is what executes document-skill scripts for DOCX/PDF/PPTX/XLSX generation. This is why the document skills can run Python, Node, Pandoc, LibreOffice, and their provided scripts.
+- **Code execution:** Pi’s normal built-in `bash` tool is what executes document-skill scripts for DOCX/PDF/PPTX/XLSX generation. This is why the document skills can run Python, Node, Pandoc, LibreOffice, and their provided scripts.

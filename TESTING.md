@@ -34,7 +34,7 @@ Run the focused tests for the feature changed in the current work first. Do not 
 - [ ] Pi correctly recognizes temporal relevance of web-search findings based on current time.
 - [ ] Web search plus rag-chat-server combined research.
 - [ ] Citation insertion and retained hyperlinks in the final answer.
-- [ ] Thought-process delivery. Coderunner-specific thought messages remain a follow-up to evaluate separately.
+- [ ] Thought-process delivery.
 - [ ] Pi uses document-creation skills, writes/runs code, and produces XLSX and PPTX artifacts.
 - [ ] Legal scope blocks legally unrelated requests.
 - [ ] LibreChat canvas previews for eligible final artifacts.
@@ -43,6 +43,67 @@ Run the focused tests for the feature changed in the current work first. Do not 
 - [ ] Upload as document.
 - [ ] Large text supplied as a document still works.
 - [ ] Legal scope blocks attempts to expose API keys or internal service details.
+
+## Isolation check
+
+`scripts/js-isolation-check.sh --yes` attacks the walls of the running stack as a test user B, against a test user A's data. It prints PASS, FAIL or LATER for each row of the isolation table in `task/tracker.md` (section 5), and its exit code is the number of failures. Its pieces are in `junior-silva/test/isolation/`.
+
+- Run it only when nobody is using the stack. It takes about 10 minutes, switches the bridge to a stand-in model with a test key, and stops the runner briefly. It puts everything back when it ends; if it can't, run `docker compose up -d`.
+- It needs the stack started with `docker compose up -d`, a bridge image built from the current code (`docker compose build`), `.env`, and `docker`, `python3`, `curl` and `ss` on the machine. It uses no real model and never prints a secret value.
+- On a shared server it matters most that Pi can't reach the server's other services. So from a slot, it tries every TCP port the host listens on, on each of the host's addresses (P7.8). Ports open only to the host's own loopback are left out, because a container can't reach them. Its control is that they answer from the host itself. Any the host itself can't connect to, often because of its own firewall, are listed as proving nothing.
+- Direct probes run a script inside a real Pi container, started with the runner's own Docker settings but without Pi, because Pi's guard would block some attacks first and hide a weak wall.
+- Full-chain tests run real Pi through the real bridge and runner, with the stand-in model scripting the attacks. Each one first proves the attack really ran.
+- It runs the model-proxy attacks once for each model in the stack's `JS_ALLOWED_MODELS` (or the default model, when that's empty), picking it for the message as LibreChat's picker does. For each run:
+  - the stand-in model answers in that provider's format, and the crafted model calls use that provider's form; for Google, that's `fileData`, `googleSearch`, `urlContext`, `codeExecution` and `cachedContent`;
+  - a call to the other provider's route must get 404, and another model 400, because each run's token allows only its own model.
+  It also checks that a model not allowed, or a level the model lacks, gets 400 before any Pi run starts. To prove both providers, allow both.
+- Every wall test has a positive control, such as user A's file being on disk while B tries to read it. A failed control counts as a failure.
+
+Then, by hand in LibreChat with two accounts:
+
+- [ ] Account A uploads a small test document and asks about it.
+- [ ] Account B asks for A's document by its exact path in the data folder (the 29 Oct attack). It must fail.
+- [ ] Stop works for both, chat titles appear, and a file Junior Silva made downloads.
+
+## Model picker (P3.18)
+
+With LibreChat's picker turned on for Junior Silva (`piModelPicker` in `librechat.yaml`):
+
+- [ ] The gauge button appears in the message box for Junior Silva only.
+- [ ] The model list shows exactly the allowed models, grouped by provider.
+- [ ] Each model's effort slider shows only that model's levels: Gemini 3.8 Flash low to high; Claude Opus 5.5 low to max. Switching models moves an unsupported level to medium.
+- [ ] A message answers on the picked model and level, and the bridge's audit log records them (`"type":"run"`).
+- [ ] A reopened chat keeps its choice, and a new chat doesn't inherit an unsent one.
+- [ ] `GET /v1/pi/models` needs the bridge key. A model not allowed, or a level the model lacks, gets 400 with a clear message.
+
+## Load test
+
+`scripts/js-load-test.py` measures how many workflows the running stack can handle at once (`task/deployment/plan.md`, M10).
+- **A workflow:** one message sent straight to the bridge, the way LibreChat sends it. It comes from a made-up test user in a new chat, and asks for research and a Word document.
+- **The order:** a baseline (one workflow, three times, one after another), then 2, 3, 5, 7 and 10 at once. After each level, it watches memory recovery for 3 minutes.
+
+- It uses the real model, so every workflow costs money. Run it only when nobody is using the stack.
+- `JS_SLOTS` must be at least the highest level. For the test only:
+  - raise it in `.env`, run `docker compose up -d`, and wait a minute for the runner to make the slots;
+  - put it back afterwards, and remove the extra `js-slot-*` networks.
+- Run it in the background, so Ctrl+C can't cut off its clean-up (MG12):
+  - start it with `nohup scripts/js-load-test.py --yes > ../js-load-test.log 2>&1 &`;
+  - watch it with `tail -f ../js-load-test.log`;
+  - stop it early with `touch ../js-load-test.stop`.
+- `--check-only` runs the checks and 10 seconds of sampling, with no workflows. `--cleanup <results folder>` removes the test users a cut-off run left behind.
+- **Before each level,** it stops if:
+  - free RAM is under 2 GiB, or disk under 3 GB;
+  - the load is at or above the CPU count;
+  - a Pi run is going;
+  - or another container restarted.
+- **During a level,** it hangs up that level's chats if free RAM falls under 1 GiB, swap thrashes, or another container restarts.
+- **Results** go to `../js-load-<time>/`. They hold no chat text and no secrets:
+  - `server.txt`;
+  - `runs.csv`, one row per workflow;
+  - `samples.csv`, every 2 seconds;
+  - `levels.csv`;
+  - `summary.txt`, each level against the stable limits.
+
 # Review clarification/evidence scenarios
 
 Before the broader suite, verify review interaction behavior for a substantive pleading or agreement:
